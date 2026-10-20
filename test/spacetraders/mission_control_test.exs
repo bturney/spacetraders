@@ -161,207 +161,6 @@ defmodule SpaceTraders.MissionControlTest do
     end
   end
 
-  describe "market_execution/1" do
-    test "reports nothing when no portfolio has been published" do
-      operator = operator_fixture()
-      scope = Scope.for_operator(operator)
-
-      assert %{
-               expected: nil,
-               realized: %{
-                 completed_round_trips: 0,
-                 realized_trade_margin: nil,
-                 realized_sale_value: nil
-               },
-               contribution: %{commitment_count: 0, expected_value: 0},
-               limitation: nil,
-               attention: []
-             } = MissionControl.market_execution(scope)
-    end
-
-    test "reports expected economics and contribution from the current portfolio" do
-      %{scope: scope} = execution_fixture()
-      report = MissionControl.market_execution(scope)
-
-      assert report.expected.decision_episode_id != nil
-      assert report.expected.expected_value == 100
-      assert report.contribution.commitment_count == 1
-      assert report.contribution.expected_value == 100
-      assert report.contribution.claims == ["SHIP-1"]
-      assert report.realized.realized_trade_margin == nil
-      assert report.attention == []
-      assert report.limitation == nil
-    end
-
-    test "resource work does not present its expected value as credit profit" do
-      %{scope: scope, portfolio: portfolio} = execution_fixture()
-
-      portfolio.strategy_decision_episode
-      |> Ecto.Changeset.change(calibration_version: "resources-v1")
-      |> Repo.update!()
-
-      report = MissionControl.market_execution(scope)
-      assert report.family == :resources
-      assert report.expected == nil
-      assert report.contribution.commitment_count == 1
-    end
-
-    test "a neutral limitation is distinct from Attention" do
-      %{scope: scope, commitment: commitment} = execution_fixture()
-
-      commitment
-      |> Ecto.Changeset.change(unwind_state: :released)
-      |> Repo.update!()
-
-      report = MissionControl.market_execution(scope)
-
-      assert report.limitation ==
-               "No eligible Fleet Commitment is active for this Fleet Generation."
-
-      assert report.attention == []
-      assert SpaceTraders.OperatorConditions.unresolved(scope) == []
-    end
-
-    test "reports realized net economics from completed buy and sell Intents" do
-      %{scope: scope, commitment: commitment} = execution_fixture()
-      ship_id = Repo.get_by!(SpaceTraders.Fleet.Ship, symbol: "SHIP-1").id
-
-      Repo.insert!(%SpaceTraders.Fleet.Intent{
-        ship_id: ship_id,
-        caller: "commitment",
-        type: "buy",
-        target_waypoint: "X1-UX81-A1",
-        status: "completed",
-        fleet_commitment_id: commitment.id,
-        fleet_commitment_portfolio_id: commitment.fleet_commitment_portfolio_id,
-        fleet_commitment_portfolio_version: 1,
-        last_action_result: %{
-          "transaction" => %{"total_price" => 50, "units" => 10, "trade_symbol" => "IRON_ORE"}
-        }
-      })
-
-      Repo.insert!(%SpaceTraders.Fleet.Intent{
-        ship_id: ship_id,
-        caller: "commitment",
-        type: "sell",
-        target_waypoint: "X1-UX81-A2",
-        status: "completed",
-        fleet_commitment_id: commitment.id,
-        fleet_commitment_portfolio_id: commitment.fleet_commitment_portfolio_id,
-        fleet_commitment_portfolio_version: 1,
-        last_action_result: %{
-          "transaction" => %{"total_price" => 150, "units" => 10, "trade_symbol" => "IRON_ORE"}
-        }
-      })
-
-      report = MissionControl.market_execution(scope)
-      assert report.realized.completed_round_trips == 1
-      assert report.realized.realized_sale_value == 150
-      assert report.realized.realized_trade_margin == 100
-      assert Enum.any?(report.realized.unknown, &(&1.item == "net_earnings"))
-    end
-  end
-
-  describe "endeavors/1" do
-    test "reports no groups before Strategy and portfolio exist" do
-      scope = Scope.for_operator(operator_fixture())
-
-      assert %{
-               groups: [],
-               released: [],
-               contribution: %{commitment_count: 0, expected_value: 0}
-             } = MissionControl.endeavors(scope)
-    end
-
-    test "groups an active Commitment under the Strategic Objective it serves" do
-      %{scope: scope, portfolio: portfolio, commitment: commitment} = execution_fixture()
-      projection = MissionControl.endeavors(scope)
-
-      assert [
-               %{
-                 priority: 1,
-                 objective: %{"objective" => "Grow credits"},
-                 endeavors: [endeavor]
-               }
-             ] = projection.groups
-
-      assert endeavor.candidate_id == commitment.candidate_id
-      assert endeavor.state == :active
-      assert endeavor.forecast == 100.0
-      assert endeavor.claims == ["SHIP-1"]
-      assert endeavor.reservations == %{"credits" => 200}
-      assert endeavor.pledges == []
-      assert endeavor.reason
-      assert endeavor.decision_episode_id == portfolio.strategy_decision_episode_id
-
-      assert String.contains?(
-               endeavor.id,
-               "endeavor-#{portfolio.strategy_decision_episode_id}-"
-             )
-
-      assert projection.released == []
-    end
-
-    test "Mission Control reports the contribution the Endeavor projection computes" do
-      %{scope: scope} = execution_fixture()
-
-      assert %{contribution: contribution} = MissionControl.endeavors(scope)
-      assert contribution == MissionControl.market_execution(scope).contribution
-    end
-
-    test "released Commitments leave the Endeavors and keep their Decision Episode evidence reachable" do
-      %{scope: scope, commitment: commitment} = execution_fixture()
-
-      commitment
-      |> Ecto.Changeset.change(unwind_state: :released)
-      |> Repo.update!()
-
-      projection = MissionControl.endeavors(scope)
-
-      assert Enum.all?(projection.groups, &(&1.endeavors == []))
-
-      assert [%{state: :released, commitment_id: commitment_id, decision_episode_id: id}] =
-               projection.released
-
-      assert commitment_id == commitment.id
-      assert Repo.get!(StrategyDecisionEpisode, id).id == id
-    end
-  end
-
-  test "Attention is scoped and repeated observation does not clear acknowledgement" do
-    owner = operator_fixture()
-    other = legacy_operator_fixture()
-    owner_scope = Scope.for_operator(owner)
-    other_scope = Scope.for_operator(other)
-
-    assert {:ok, condition} =
-             SpaceTraders.OperatorConditions.raise(
-               owner_scope,
-               "floor",
-               :attention,
-               "Credit floor infeasible"
-             )
-
-    assert SpaceTraders.OperatorConditions.acknowledge(other_scope, condition.id) ==
-             {:error, :condition_unavailable}
-
-    assert SpaceTraders.OperatorConditions.unresolved(other_scope) == []
-    assert :ok = SpaceTraders.OperatorConditions.acknowledge(owner_scope, condition.id)
-
-    assert {:ok, repeated} =
-             SpaceTraders.OperatorConditions.raise(
-               owner_scope,
-               "floor",
-               :attention,
-               "Credit floor infeasible"
-             )
-
-    assert repeated.id == condition.id
-    assert repeated.acknowledged_at
-    assert [%{id: id}] = SpaceTraders.OperatorConditions.unresolved(owner_scope)
-    assert id == condition.id
-  end
-
   test "history projections answer only the deployment Operator; a legacy identity selects nothing" do
     deployment_scope = Scope.for_operator(operator_fixture())
     legacy = legacy_operator_fixture()
@@ -400,46 +199,18 @@ defmodule SpaceTraders.MissionControlTest do
         calibration_version: "market-v1"
       })
 
-    {:ok, condition} =
-      SpaceTraders.OperatorConditions.raise(
-        legacy_scope,
-        "objective-infeasible:#{generation.id}:#{revision.id}:0",
-        :attention,
-        "Legacy note"
-      )
-
-    assert MissionControl.activity(legacy_scope) == []
     assert MissionControl.generation_recaps(legacy_scope) == []
     assert MissionControl.decision_episode(legacy_scope, episode.id) == nil
     assert MissionControl.decision_episode_comparison(legacy_scope) == []
-    assert {:error, _} = SpaceTraders.OperatorConditions.resolve(legacy_scope, condition.key)
 
     # The retained legacy rows keep their original attribution.
     assert Repo.get!(StrategyDecisionEpisode, episode.id).fleet_generation_id == generation.id
-
-    assert Enum.any?(
-             MissionControl.activity(deployment_scope),
-             &(&1[:decision_episode_id] == episode.id)
-           )
 
     assert MissionControl.decision_episode(deployment_scope, episode.id)
     assert [%{id: id}] = MissionControl.decision_episode_comparison(deployment_scope)
     assert id == episode.id
 
-    assert [%{revisions: [1], limitations: limitations}] =
-             MissionControl.generation_recaps(deployment_scope)
-
-    assert "Legacy note" in limitations
-    assert [condition] == SpaceTraders.OperatorConditions.unresolved(deployment_scope)
-    assert [condition] == SpaceTraders.OperatorConditions.history(deployment_scope)
-    assert :ok = SpaceTraders.OperatorConditions.acknowledge(deployment_scope, condition.id)
-    assert :ok = SpaceTraders.OperatorConditions.resolve(deployment_scope, condition.key)
-    assert [] == SpaceTraders.OperatorConditions.unresolved(deployment_scope)
-
-    assert [%{operator_id: author, acknowledged_at: %DateTime{}, resolved_at: %DateTime{}}] =
-             SpaceTraders.OperatorConditions.history(deployment_scope)
-
-    assert author == legacy.id
+    assert [%{revisions: [1]}] = MissionControl.generation_recaps(deployment_scope)
   end
 
   describe "strategy/1" do
@@ -821,7 +592,6 @@ defmodule SpaceTraders.MissionControlTest do
             SpaceTraders.FleetAllocation.Commitment,
             SpaceTraders.FleetAllocation.Portfolio,
             SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
-            SpaceTraders.ShipReservation,
             SpaceTraders.Evidence.Observation
           ],
           &Repo.aggregate(&1, :count)
@@ -912,82 +682,6 @@ defmodule SpaceTraders.MissionControlTest do
 
   defp observe_market(agent, waypoint, purchase_price, sell_price) do
     governed_market_observation(agent, "X1", waypoint, purchase_price, sell_price)
-  end
-
-  defp execution_fixture do
-    operator = operator_fixture()
-    scope = Scope.for_operator(operator)
-    agent = agent_fixture(operator)
-
-    Repo.insert!(%SpaceTraders.Fleet.Ship{
-      symbol: "SHIP-1",
-      ship_type: "SHIP_FRIGATE",
-      agent_id: agent.id
-    })
-
-    strategy =
-      Repo.insert!(%SpaceTraders.FleetStrategy.Strategy{
-        operator_id: operator.id,
-        revision_number: 1
-      })
-
-    revision =
-      Repo.insert!(%SpaceTraders.FleetStrategy.Revision{
-        fleet_strategy_id: strategy.id,
-        number: 1,
-        document: %{
-          "objectives" => [%{"objective" => "Grow credits"}],
-          "hard_constraints" => [%{"kind" => "credit_floor", "minimum" => 500}]
-        },
-        source: "operator",
-        activated_at: DateTime.utc_now(:second)
-      })
-
-    strategy
-    |> Ecto.Changeset.change(active_revision_id: revision.id)
-    |> Repo.update!()
-
-    generation =
-      SpaceTraders.AgentFixtures.generation_fixture(%SpaceTraders.FleetGeneration.Generation{
-        operator_id: operator.id,
-        agent_id: agent.id,
-        fleet_strategy_revision_id: revision.id,
-        number: 1,
-        symbol: agent.symbol,
-        faction: agent.faction,
-        replacement_symbols: %{},
-        objective_progress: %{}
-      })
-
-    candidate = %SpaceTraders.FleetAllocation.PortfolioCandidate{
-      id: "candidate-1",
-      strategy_revision_id: revision.id,
-      objective_index: 0,
-      claims: ["SHIP-1"],
-      reservations: %{credits: 200},
-      pledges: [],
-      dependencies: [],
-      expected_value: 100,
-      unwind_cost: 0
-    }
-
-    {:ok, selection} =
-      SpaceTraders.FleetAllocation.select_portfolio(revision, [candidate], %{
-        as_of: DateTime.utc_now(),
-        source_version: 0,
-        claims: ["SHIP-1"],
-        reservations: %{credits: 200}
-      })
-
-    {:ok, portfolio} =
-      SpaceTraders.FleetAllocation.publish_portfolio(scope, generation.id, selection, %{
-        evidence_references: [],
-        expectations: %{},
-        calibration_version: "market-v1"
-      })
-
-    [commitment] = portfolio.commitments
-    %{scope: scope, portfolio: portfolio, commitment: commitment}
   end
 
   defp available_response(conn, symbol) do

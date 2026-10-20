@@ -520,7 +520,7 @@ defmodule SpaceTraders.CapacityDeferralTest do
   end
 
   # Capacity Deferral: durable waiting work, unchanged mutation truth, and one
-  # pending wakeup naming the Intent. Never blocked (Attention) or infeasible.
+  # pending wakeup naming the Intent. Never blocked or infeasible.
   defp assert_capacity_deferred(selected, attempt) do
     current = Repo.get!(Intent, selected.id)
     assert current.status == "waiting"

@@ -19,47 +19,10 @@ defmodule SpaceTraders.Fleet do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.API.AgentTokenReference
-  alias SpaceTraders.Fleet.{Activity, IntentBlocker, Ship, ShipDestination}
+  alias SpaceTraders.Fleet.{Activity, IntentBlocker, Ship, ShipCargo, ShipDestination}
 
-  alias SpaceTraders.Fleet.Intents
   alias SpaceTraders.Repo
   alias SpaceTraders.{Agent, Contracts, Intelligence, World}
-
-  @doc "Safely retires pre-stop execution state before fresh Fleet planning."
-  def prepare_emergency_stop_resume(now) do
-    current_ship_ids = current_ship_ids(:current_generation)
-    stale_ship_ids = current_ship_ids(:stale_generation)
-    all_ship_ids = current_ship_ids ++ stale_ship_ids
-
-    Intents.censor_reset_generation(stale_ship_ids, now)
-
-    if Intents.emergency_stop_reconciled?(current_ship_ids) do
-      Intents.supersede_for_emergency_stop(all_ship_ids, now)
-      :ok
-    else
-      {:error, :reconciliation_required}
-    end
-  end
-
-  defp current_ship_ids(generation) do
-    stale_filter =
-      case generation do
-        :current_generation -> dynamic([_ship, agent], is_nil(agent.stale_at))
-        :stale_generation -> dynamic([_ship, agent], not is_nil(agent.stale_at))
-      end
-
-    Repo.all(
-      from ship in Ship,
-        join: agent in AgentRecord,
-        on: agent.id == ship.agent_id,
-        join: fleet in SpaceTraders.FleetGeneration.Generation,
-        on: fleet.agent_id == agent.id,
-        join: identity in "current_fleet_identity",
-        on: identity.id == 1 and identity.fleet_generation_id == fleet.id,
-        where: ^stale_filter,
-        select: ship.id
-    )
-  end
 
   @doc """
   Pulls the agent's live fleet from the game API.
@@ -79,6 +42,233 @@ defmodule SpaceTraders.Fleet do
 
   def list_ships(%AgentRecord{}), do: {:error, :agent_token_missing}
 
+  @doc "Subscribes the caller to `{:ship_state, %Ship{}}`, one message per stored Ship change."
+  def subscribe_ship_state(agent_id) when is_integer(agent_id),
+    do: Phoenix.PubSub.subscribe(SpaceTraders.PubSub, ship_state_topic(agent_id))
+
+  defp ship_state_topic(agent_id), do: "ship_state:#{agent_id}"
+
+  @doc """
+  Subscribes the caller to Intent status changes of every Ship, as
+  `{:intent_changed, ship_id}`: a prompt to re-read, never data. It arrives
+  after the change commits.
+  """
+  def subscribe_intent_changes,
+    do: Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "intent_changes")
+
+  @doc false
+  def broadcast_intent_change(ship_id),
+    do:
+      Phoenix.PubSub.broadcast(SpaceTraders.PubSub, "intent_changes", {:intent_changed, ship_id})
+
+  @doc """
+  Current Ships of an Agent with their stored state and Cargo, in natural name
+  order (`AGENT-2` before `AGENT-10`). Reads only the database.
+  """
+  def current_ships(agent_id) when is_integer(agent_id) do
+    from(ship in Ship,
+      where: ship.agent_id == ^agent_id and is_nil(ship.retired_at),
+      preload: [:cargo]
+    )
+    |> Repo.all()
+    |> Enum.sort_by(&name_order(&1.symbol))
+  end
+
+  @doc "The given current Ships of an Agent, as `current_ships/1` reads them."
+  def current_ships(agent_id, ship_ids) when is_integer(agent_id) and is_list(ship_ids) do
+    from(ship in Ship,
+      where: ship.agent_id == ^agent_id and is_nil(ship.retired_at) and ship.id in ^ship_ids,
+      preload: [:cargo]
+    )
+    |> Repo.all()
+    |> Enum.sort_by(&name_order(&1.symbol))
+  end
+
+  @doc """
+  Sort key of a Ship symbol in natural name order. The game numbers an
+  Agent's Ships with a hexadecimal suffix (`-9`, `-A`, `-10`): order by
+  prefix, then by that number.
+  """
+  def name_order(symbol) do
+    {prefix, suffix} =
+      case symbol |> String.split("-") |> Enum.split(-1) do
+        {[], [only]} -> {"", only}
+        {parts, [last]} -> {Enum.join(parts, "-"), last}
+      end
+
+    case Integer.parse(suffix, 16) do
+      {n, ""} -> {prefix, 0, n, suffix}
+      _ -> {prefix, 1, 0, suffix}
+    end
+  end
+
+  @doc """
+  Stores what one Ship-bearing game response says about the Agent's Ships.
+
+  Called by `SpaceTraders.API` with every decoded success: whole Ships (owned
+  Fleet and Ship reads, purchases, registration) and the partial nav, fuel and
+  Cargo a Ship action returns for the Ship named in its path.
+  """
+  def record_ship_response(agent_id, path, response) when is_integer(agent_id) do
+    response
+    |> ship_facts(path)
+    |> Enum.each(fn {symbol, facts} -> record_ship_state(agent_id, symbol, facts) end)
+  rescue
+    exception ->
+      Logger.error("Ship state not recorded: #{Exception.message(exception)}")
+      :ok
+  end
+
+  def record_ship_response(_agent_id, _path, _response), do: :ok
+
+  defp ship_facts(ships, _path) when is_list(ships),
+    do: Enum.flat_map(ships, &ship_facts(&1, nil))
+
+  defp ship_facts(%SpaceTraders.API.Model.Ship{symbol: symbol} = ship, _path)
+       when is_binary(symbol),
+       do: [{symbol, Map.from_struct(ship)}]
+
+  defp ship_facts(%{ship: %SpaceTraders.API.Model.Ship{} = ship}, _path),
+    do: ship_facts(ship, nil)
+
+  defp ship_facts(%{ships: ships}, _path) when is_list(ships), do: ship_facts(ships, nil)
+
+  defp ship_facts(%{} = response, path) when is_binary(path) and not is_struct(response) do
+    with ["my", "ships", symbol, _action | _] <- String.split(path, "/", trim: true),
+         facts when map_size(facts) > 0 <- Map.take(response, [:nav, :fuel, :cargo, :cooldown]) do
+      [{symbol, facts}]
+    else
+      _ -> []
+    end
+  end
+
+  defp ship_facts(_response, _path), do: []
+
+  @doc """
+  The one upsert of a registered Ship's current state from game facts (any of
+  `:nav`, `:fuel`, `:cargo`, `:cooldown`, `:engine`, `:frame`). Absent facts keep their last
+  observed value; Cargo is replaced as a set. Unregistered Ships are ignored:
+  registration stays with authoritative acquisition. Broadcasts the stored Ship.
+  """
+  def record_ship_state(agent_id, symbol, facts) when is_binary(symbol) and is_map(facts) do
+    changes =
+      facts
+      |> state_changes()
+      |> Map.put(:state_observed_at, SpaceTraders.Clock.utc_now())
+
+    {:ok, ship} =
+      Repo.transaction(fn ->
+        from(ship in Ship,
+          where:
+            ship.agent_id == ^agent_id and ship.symbol == ^symbol and is_nil(ship.retired_at),
+          lock: "FOR UPDATE"
+        )
+        |> Repo.one()
+        |> case do
+          nil ->
+            nil
+
+          ship ->
+            ship = ship |> Ecto.Changeset.change(changes) |> Repo.update!()
+            replace_cargo(ship, Map.get(facts, :cargo))
+            Repo.preload(ship, :cargo, force: true)
+        end
+      end)
+
+    if ship do
+      Phoenix.PubSub.broadcast(
+        SpaceTraders.PubSub,
+        ship_state_topic(agent_id),
+        {:ship_state, ship}
+      )
+    end
+
+    {:ok, ship}
+  end
+
+  defp state_changes(facts) do
+    [
+      engine_changes(Map.get(facts, :engine)),
+      frame_changes(Map.get(facts, :frame)),
+      fuel_changes(Map.get(facts, :fuel)),
+      cargo_capacity_changes(Map.get(facts, :cargo)),
+      nav_changes(Map.get(facts, :nav)),
+      cooldown_changes(Map.get(facts, :cooldown))
+    ]
+    |> Enum.reduce(%{}, &Map.merge(&2, &1))
+  end
+
+  defp engine_changes(%{speed: speed, condition: condition}),
+    do: %{engine_speed: speed, engine_condition: condition && condition / 1}
+
+  defp engine_changes(_), do: %{}
+
+  defp frame_changes(%{fuel_capacity: capacity}) when is_integer(capacity),
+    do: %{fuel_capacity: capacity}
+
+  defp frame_changes(_), do: %{}
+
+  defp fuel_changes(%{current: current, capacity: capacity}),
+    do: Map.reject(%{fuel_current: current, fuel_capacity: capacity}, &is_nil(elem(&1, 1)))
+
+  defp fuel_changes(_), do: %{}
+
+  defp cargo_capacity_changes(%{capacity: capacity}) when is_integer(capacity),
+    do: %{cargo_capacity: capacity}
+
+  defp cargo_capacity_changes(_), do: %{}
+
+  defp nav_changes(%{status: status} = nav) when is_binary(status) do
+    route = nav.route || %{}
+
+    %{
+      nav_status: status,
+      waypoint_symbol: nav.waypoint_symbol,
+      route_origin: route_waypoint(Map.get(route, :origin)),
+      route_destination: route_waypoint(Map.get(route, :destination)),
+      route_departed_at: route_time(Map.get(route, :departure_time)),
+      route_arrives_at: route_time(Map.get(route, :arrival))
+    }
+  end
+
+  defp nav_changes(_), do: %{}
+
+  defp cooldown_changes(%{remaining_seconds: seconds, expiration: expiration})
+       when is_integer(seconds) and seconds > 0,
+       do: %{cooldown_expires_at: route_time(expiration)}
+
+  defp cooldown_changes(%{remaining_seconds: seconds}) when is_integer(seconds),
+    do: %{cooldown_expires_at: nil}
+
+  defp cooldown_changes(_), do: %{}
+
+  defp route_waypoint(%{symbol: symbol}), do: symbol
+  defp route_waypoint(_), do: nil
+
+  defp route_time(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, time, _offset} -> DateTime.truncate(time, :second)
+      _ -> nil
+    end
+  end
+
+  defp route_time(_), do: nil
+
+  defp replace_cargo(_ship, nil), do: :ok
+
+  defp replace_cargo(ship, cargo) do
+    Repo.delete_all(from item in ShipCargo, where: item.ship_id == ^ship.id)
+
+    rows =
+      for %{symbol: symbol, units: units} <- cargo.inventory || [],
+          is_binary(symbol) and is_integer(units) and units > 0 do
+        %{ship_id: ship.id, trade_symbol: symbol, units: units}
+      end
+
+    Repo.insert_all(ShipCargo, rows)
+    :ok
+  end
+
   @doc """
   Registers a Ship in the local registry after authoritative evidence.
 
@@ -87,7 +277,7 @@ defmodule SpaceTraders.Fleet do
   established the capabilities its acquisition promised. Registration grants no
   Claim; Fleet Allocation does that separately.
   """
-  def register_ship(%AgentRecord{} = agent, %{symbol: symbol}, ship_type)
+  def register_ship(%AgentRecord{} = agent, %{symbol: symbol} = observed, ship_type)
       when is_binary(symbol) and symbol != "" and is_binary(ship_type) and ship_type != "" do
     now = DateTime.utc_now(:second)
 
@@ -101,8 +291,13 @@ defmodule SpaceTraders.Fleet do
       end
 
     case result do
-      {:ok, ship} -> {:ok, ship}
-      {:error, changeset} -> {:error, changeset}
+      {:ok, ship} ->
+        # The authoritative read arrived before the row existed.
+        record_ship_response(agent.id, nil, observed)
+        {:ok, ship}
+
+      {:error, changeset} ->
+        {:error, changeset}
     end
   end
 
@@ -160,18 +355,17 @@ defmodule SpaceTraders.Fleet do
       markets: {:error, :stale_agent},
       waypoints: {:error, :stale_agent},
       activity: [],
-      control: %{attention: [], attention_count: 0, healthy?: false}
+      control: %{healthy?: false}
     }
   end
 
   # These facts keep operational interpretation at the Ship Execution boundary.
   # The dashboard can still render the underlying game state without recreating
-  # decisions about what needs an Operator's attention.
+  # operational decisions.
   defp annotate_control_state({:ok, ships}) do
     {:ok,
      Enum.map(ships, fn ship ->
        Map.put(ship, :control, %{
-         attention: ship_attention(ship),
          readiness: %{flight_mode: ship_flight_mode(ship)},
          navigation: %{
            available?: Map.get(Map.get(ship, :actions, %{}), :navigate, %{})[:allowed?] == true,
@@ -185,52 +379,16 @@ defmodule SpaceTraders.Fleet do
   defp annotate_control_state(result), do: result
 
   defp fleet_control({:ok, ships}) do
-    attention = Enum.filter(ships, & &1.control.attention.needed?)
-
     %{
-      attention: attention,
-      attention_count: length(attention),
-      healthy?: ships != [] and attention == []
+      healthy?:
+        ships != [] and not Enum.any?(ships, &match?(%{intents: %{status: "blocked"}}, &1))
     }
   end
 
-  defp fleet_control(_), do: %{attention: [], attention_count: 0, healthy?: false}
-
-  defp ship_attention(%{intents: %{status: "blocked"} = intent}) do
-    %{needed?: true, summary: intent_attention_summary(intent)}
-  end
-
-  defp ship_attention(_), do: %{needed?: false, summary: nil}
+  defp fleet_control(_), do: %{healthy?: false}
 
   defp ship_flight_mode(%{nav: %{flight_mode: mode}}) when is_binary(mode), do: mode
   defp ship_flight_mode(_), do: "—"
-
-  defp intent_attention_summary(%{blocker: %IntentBlocker{} = blocker}),
-    do: blocker_attention_summary(blocker)
-
-  defp intent_attention_summary(_), do: "Blocked"
-
-  defp blocker_attention_summary(%IntentBlocker{summary: summary})
-       when is_binary(summary) and summary != "",
-       do: summary
-
-  defp blocker_attention_summary(%IntentBlocker{
-         corrective_actions: actions,
-         resolver: resolver,
-         retry_condition: retry_condition
-       }) do
-    actions = Enum.join(actions || [], ", ")
-
-    [
-      if(actions == "", do: "Resolve blocked work", else: "Actions: #{actions}"),
-      if(is_binary(resolver) and resolver != "", do: "Resolver: #{resolver}"),
-      if(is_binary(retry_condition) and retry_condition != "",
-        do: "retry when #{retry_condition}"
-      )
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join("; ")
-  end
 
   defp annotate_activity(activity) do
     Enum.map(activity, fn event ->
@@ -383,14 +541,14 @@ defmodule SpaceTraders.Fleet do
   defp intents_for_ships(agent) do
     agent
     |> SpaceTraders.Fleet.Intents.current()
-    |> Enum.filter(&(&1.caller in ["commitment", "intervention"]))
+    |> Enum.filter(&(&1.caller == "commitment"))
     |> Map.new(&{&1.ship_id, &1})
   end
 
   defp intents_history_for_ships(agent) do
     agent
     |> SpaceTraders.Fleet.Intents.history()
-    |> Enum.filter(&(&1.caller in ["commitment", "intervention"]))
+    |> Enum.filter(&(&1.caller == "commitment"))
     |> Enum.group_by(& &1.ship_id)
   end
 

@@ -32,15 +32,12 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
   selection kind, a Neutral Wait or a recovery authority, and the allocation
   result pointer never references it.
 
-  An open stall raises one Degraded Attention per Fleet Generation (GLOSSARY:
-  Attention summarizes Degraded Operation); the recovering observation
-  resolves it. Time-based escalation stays deferred (#684).
+  Time-based escalation stays deferred (#684).
   """
 
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.Clock
   alias SpaceTraders.CreditCalibration
   alias SpaceTraders.Evidence
@@ -49,7 +46,7 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
-  alias SpaceTraders.{OperatorConditions, Repo}
+  alias SpaceTraders.Repo
 
   # Refusals of execution authority itself, not of the game or of spending.
   @authority_blockers ~w(
@@ -72,7 +69,7 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
     case FleetAllocation.active_generation(agent) do
       %Generation{} = generation ->
         stall = diagnose(agent, revision, portfolio, decision)
-        generation |> record(revision, stall) |> attention(generation)
+        generation |> record(revision, stall)
 
       nil ->
         :healthy
@@ -216,43 +213,6 @@ defmodule SpaceTraders.FleetAllocation.StructuralStall do
 
     result
   end
-
-  # Degraded Attention follows the durable stall: raised (idempotently) while
-  # it is open, resolved by the recovering observation. Never time-based.
-  defp attention({:stalled, episode} = result, generation) do
-    OperatorConditions.raise(
-      scope(generation),
-      attention_key(generation),
-      :attention,
-      "Degraded Operation: Market allocation is structurally stalled. " <>
-        stall_summary(episode.stall_reason) <>
-        " It clears by reconciliation; Mission Control shows the release condition.",
-      fleet_generation_id: generation.id,
-      fleet_strategy_revision_id: episode.fleet_strategy_revision_id,
-      strategy_decision_episode_id: episode.id
-    )
-
-    result
-  end
-
-  defp attention(:healthy, generation) do
-    OperatorConditions.resolve(scope(generation), attention_key(generation))
-    :healthy
-  end
-
-  defp stall_summary(:stale_revision_portfolio),
-    do: "The current Portfolio belongs to a superseded Strategy Revision."
-
-  defp stall_summary(:authority_blocked_intent),
-    do: "A current Commitment's Intent is blocked on execution authority."
-
-  defp stall_summary(:overdue_demands_without_coverage),
-    do: "Overdue Market Observation Demands have no coverage and no decisive reason."
-
-  defp attention_key(generation), do: "allocation-stall:#{generation.id}"
-
-  defp scope(generation),
-    do: Scope.for_operator(Repo.get!(Operator, generation.operator_id))
 
   defp unchanged?(nil, _revision, _stall), do: false
 

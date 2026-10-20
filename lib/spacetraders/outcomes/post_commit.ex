@@ -2,8 +2,8 @@ defmodule SpaceTraders.Outcomes.PostCommit do
   @moduledoc """
   Cheap writer-side bridge from Repo query telemetry to the single Outcomes worker.
 
-  Ecto emits transaction telemetry in the writer process. Buffer bounded dirty
-  families, additive scan counts and retained owned observations there until the
+  Ecto emits transaction telemetry in the writer process. Buffer the bounded dirty
+  families and retained owned observations there until the
   outer COMMIT; ROLLBACK discards them. Nested Repo transactions share that outer
   boundary. No writer SQL, worker wait, or second process is introduced.
   """
@@ -11,8 +11,18 @@ defmodule SpaceTraders.Outcomes.PostCommit do
 
   alias SpaceTraders.{Evidence.Observation, Repo}
 
-  @fleet_families [:claim, :intent_state, :nav_status]
-  @families @fleet_families ++ [:chart]
+  @families [:status]
+  # Tables a Ship status reads (`MissionControl.ShipStatus`).
+  @status_sources ~w(
+    ships
+    intents
+    fleet_commitment_claims
+    fleet_commitments
+    fleet_commitment_portfolios
+    allocation_result_pointers
+    strategy_decision_episodes
+    earnings_records
+  )
   @handler {__MODULE__, :durable_changes}
   @pending {__MODULE__, :pending}
 
@@ -31,7 +41,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
 
   # Called inside the observation's retention transaction, before its COMMIT.
   def observe(%Observation{operation_id: operation} = observation)
-      when operation in ["get-my-agent", "get-contracts"] do
+      when operation == "get-my-agent" do
     case Process.get(@pending) do
       nil ->
         # A missing BEGIN (for example, the bridge started during this
@@ -51,6 +61,37 @@ defmodule SpaceTraders.Outcomes.PostCommit do
 
   def observe(_observation), do: :ok
 
+  @doc """
+  Announces an Intent change of a Ship (`Fleet.broadcast_intent_change/1`)
+  once the writer's transaction commits; a rollback drops it. Outside a
+  transaction, or without a known BEGIN, it is announced at once.
+  """
+  def intent_changed(ship_id) do
+    case Process.get(@pending) do
+      nil -> SpaceTraders.Fleet.broadcast_intent_change(ship_id)
+      pending -> Process.put(@pending, %{pending | intents: [ship_id | pending.intents]})
+    end
+
+    :ok
+  end
+
+  @doc """
+  Called inside the Earnings record's own transaction, before its COMMIT: the
+  worker emits the record's metrics and Loki line only once it commits.
+  """
+  def earnings(%SpaceTraders.Outcomes.EarningsRecord{} = record) do
+    case Process.get(@pending) do
+      nil -> drop()
+      pending -> Process.put(@pending, %{pending | earnings: [record | pending.earnings]})
+    end
+
+    :ok
+  rescue
+    _ -> drop()
+  catch
+    _, _ -> drop()
+  end
+
   # Retain only the bounded nav fact in the existing mutation ledger. Its
   # recorded_at supplies ordering against subsequent owned reads.
   def nav_evidence(%{nav: %{status: status}}) when status in ~w(DOCKED IN_ORBIT IN_TRANSIT),
@@ -62,12 +103,23 @@ defmodule SpaceTraders.Outcomes.PostCommit do
   def durable_change(_event, _measurements, metadata, worker) do
     case metadata do
       %{query: "begin", result: {:ok, _}} ->
-        Process.put(@pending, %{families: MapSet.new(), scans: 0, observations: []})
+        Process.put(@pending, %{
+          families: MapSet.new(),
+          observations: [],
+          earnings: [],
+          intents: []
+        })
 
       %{query: "commit", result: {:ok, _}} ->
         if pending = Process.delete(@pending) do
           notify(worker, pending)
           Enum.each(Enum.reverse(pending.observations), &GenServer.cast(worker, {:observe, &1}))
+          Enum.each(Enum.reverse(pending.earnings), &GenServer.cast(worker, {:earnings, &1}))
+
+          pending.intents
+          |> Enum.reverse()
+          |> Enum.uniq()
+          |> Enum.each(&SpaceTraders.Fleet.broadcast_intent_change/1)
         end
 
       %{query: "rollback"} ->
@@ -75,10 +127,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
 
       %{result: {:ok, %{command: command, num_rows: rows}}}
       when command in [:insert, :update, :delete] and rows > 0 ->
-        change = %{
-          families: MapSet.new(changed_families(metadata, command)),
-          scans: scan_events(metadata, command, rows)
-        }
+        change = %{families: MapSet.new(changed_families(metadata, command))}
 
         case Process.get(@pending) do
           nil ->
@@ -87,8 +136,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
           pending ->
             Process.put(@pending, %{
               pending
-              | families: MapSet.union(pending.families, change.families),
-                scans: pending.scans + change.scans
+              | families: MapSet.union(pending.families, change.families)
             })
         end
 
@@ -108,7 +156,7 @@ defmodule SpaceTraders.Outcomes.PostCommit do
     :ok
   end
 
-  defp changed_families(%{source: "ships"}, _), do: @fleet_families
+  defp changed_families(%{source: source}, _) when source in @status_sources, do: [:status]
 
   defp changed_families(%{source: source}, command)
        when source in ["agents", "fleet_generations"] and command in [:insert, :delete],
@@ -121,62 +169,10 @@ defmodule SpaceTraders.Outcomes.PostCommit do
        else: []
   end
 
-  defp changed_families(%{source: source}, _)
-       when source in [
-              "fleet_commitment_claims",
-              "fleet_commitments",
-              "fleet_commitment_portfolios"
-            ],
-       do: [:claim]
-
-  defp changed_families(%{source: "intents"}, _), do: [:intent_state]
-
-  defp changed_families(%{source: "intelligence_observations"} = metadata, :insert) do
-    if scan_events(metadata, :insert, 1) > 0, do: [:chart], else: []
-  end
-
-  defp changed_families(%{source: "intelligence_facts"} = metadata, :update) do
-    if "waypoint" in (metadata.cast_params || metadata.params), do: [:chart], else: []
-  end
-
-  defp changed_families(%{source: source}, command)
-       when source in ["intelligence_facts", "intelligence_observations"] and
-              command in [:update, :delete],
-       do: [:chart]
-
-  defp changed_families(%{source: source}, :delete)
-       when source in ["authoritative_observations", "mutation_attempt_outcomes"],
-       do: [:nav_status]
-
-  defp changed_families(%{source: "authoritative_observations"} = metadata, _) do
-    if Enum.any?(
-         metadata.cast_params || metadata.params,
-         &(&1 in ["get-my-ship", "get-my-ships"])
-       ),
-       do: [:nav_status],
-       else: []
-  end
-
-  defp changed_families(%{source: "mutation_attempt_outcomes"} = metadata, _) do
-    if Enum.any?(metadata.cast_params || metadata.params, fn
-         %{"nav_status" => status} -> status in ~w(DOCKED IN_ORBIT IN_TRANSIT)
-         _ -> false
-       end),
-       do: [:nav_status],
-       else: []
-  end
-
   defp changed_families(_, _), do: []
 
-  defp scan_events(%{source: "intelligence_observations"} = metadata, :insert, rows) do
-    params = metadata.cast_params || metadata.params
-    if "scan_waypoints" in params and "waypoint" in params, do: rows, else: 0
-  end
-
-  defp scan_events(_, _, _), do: 0
-
-  defp notify(worker, %{families: families, scans: scans}) do
-    if MapSet.size(families) > 0 or scans > 0,
-      do: send(worker, {:dirty, %{families: families, scans: scans}})
+  defp notify(worker, %{families: families}) do
+    if MapSet.size(families) > 0,
+      do: send(worker, {:dirty, %{families: families}})
   end
 end

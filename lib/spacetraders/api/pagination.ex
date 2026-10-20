@@ -22,6 +22,30 @@ defmodule SpaceTraders.API.Pagination do
     )
   end
 
+  @doc """
+  Collects every owned Ship page. A page repeating an already collected Ship
+  ends the read, so a source that ignores paging cannot loop forever.
+  """
+  @spec ships((keyword() -> {:ok, list()} | {:error, term()})) ::
+          {:ok, list()} | {:error, term(), list()}
+  def ships(fetch_page) when is_function(fetch_page, 1) do
+    Stream.iterate(1, &(&1 + 1))
+    |> Enum.reduce_while({:ok, [], MapSet.new()}, fn page, {:ok, collected, seen} ->
+      case fetch_page.(limit: @default_limit, page: page) do
+        {:ok, ships} when is_list(ships) ->
+          fresh = Enum.reject(ships, &MapSet.member?(seen, &1.symbol))
+          collected = [fresh | collected]
+
+          if length(ships) < @default_limit or length(fresh) < length(ships),
+            do: {:halt, {:ok, flatten_pages(collected)}},
+            else: {:cont, {:ok, collected, MapSet.union(seen, MapSet.new(fresh, & &1.symbol))}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason, flatten_pages(collected)}}
+      end
+    end)
+  end
+
   @doc "Collects pages until an empty or short page is returned."
   @spec collect((pos_integer() -> {:ok, list()} | {:error, term()}), pos_integer()) ::
           {:ok, list()} | {:error, term(), list()}

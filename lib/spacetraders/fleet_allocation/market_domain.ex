@@ -159,12 +159,7 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
   defp decide(scope, agent, revision, current, held, planning, demands) do
     %{occupancy: occupancy, availability: availability, free: free} = held
 
-    candidates =
-      SpaceTraders.FleetAllocation.MarketWorkRate.annotate(
-        agent,
-        Enum.flat_map(planning, & &1.candidate_contributions),
-        availability
-      )
+    candidates = Enum.flat_map(planning, & &1.candidate_contributions)
 
     planned_ids = MapSet.new(candidates, & &1.id)
 
@@ -278,13 +273,49 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
       expectations: %{
         domain: :market,
         expected_value: Enum.sum_by(selected, & &1.expected_value),
-        commitment_count: length(selected)
+        commitment_count: length(selected),
+        selected_trades: selected_trades(candidates, selected_ids)
       },
       calibration_version:
         if(trade_selected?,
           do: FleetAllocation.market_calibration_version(),
           else: "intelligence-v1"
         )
+    }
+  end
+
+  @compared_trades 10
+
+  # Each selected trade keeps its expected net credits per Ship-hour and the
+  # estimates of the best trades it beat, copied so later reads need no join.
+  defp selected_trades(candidates, selected_ids) do
+    trades =
+      candidates
+      |> Enum.filter(&(&1.kind == :market_trade))
+      |> Enum.sort_by(&{is_nil(rate(&1)), -(rate(&1) || 0), &1.id})
+
+    for trade <- trades, MapSet.member?(selected_ids, trade.id) do
+      alternatives =
+        trades
+        |> Enum.reject(&MapSet.member?(selected_ids, &1.id))
+        |> Enum.take(@compared_trades)
+        |> Enum.map(&trade_summary/1)
+
+      Map.put(trade_summary(trade), :alternatives, alternatives)
+    end
+  end
+
+  defp rate(candidate), do: Map.get(candidate.expected_outcomes, :net_credits_per_ship_hour)
+
+  defp trade_summary(candidate) do
+    %{
+      candidate_id: candidate.id,
+      trade_symbol: candidate.trade_symbol,
+      source_waypoint: candidate.source_waypoint,
+      destination_waypoint: candidate.destination_waypoint,
+      maximum_credit_change: candidate.expected_outcomes.maximum_credit_change,
+      net_credits_per_ship_hour: rate(candidate),
+      trade_estimate: Map.get(candidate.expected_outcomes, :trade_estimate)
     }
   end
 

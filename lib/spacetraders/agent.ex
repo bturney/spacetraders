@@ -123,15 +123,9 @@ defmodule SpaceTraders.Agent do
   def link_account_token(%Scope{operator: %Operator{} = operator}, account_token)
       when is_binary(account_token) do
     if FleetGeneration.Identity.operator?(operator.id) do
-      result =
-        operator
-        |> Operator.account_token_changeset(%{account_token: account_token})
-        |> Repo.update(log: false)
-
-      if match?({:ok, _operator}, result),
-        do: SpaceTraders.EmergencyStopAdmission.track_credential(operator.id, account_token)
-
-      result
+      operator
+      |> Operator.account_token_changeset(%{account_token: account_token})
+      |> Repo.update(log: false)
     else
       {:error, :not_current_operator}
     end

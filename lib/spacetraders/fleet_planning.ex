@@ -14,6 +14,7 @@ defmodule SpaceTraders.FleetPlanning do
   alias SpaceTraders.CreditCalibration.Version
   alias SpaceTraders.CreditSpending
   alias SpaceTraders.Fleet.FuelReach
+  alias SpaceTraders.Fleet.TradeEstimate
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.FleetPlanning.ShipInvestment
 
@@ -270,7 +271,7 @@ defmodule SpaceTraders.FleetPlanning do
 
   Supply `:unmet_work` from `FleetAllocation.ship_bound_unmet_work/2`,
   `:generation_horizon` from `GenerationHorizon.current/2`, and
-  `:realized_trade_progress` from `TradeProgress.for_generation/1`, all for the
+  `:realized_earnings` from `SpaceTraders.Outcomes.Earnings.list/1`, all for the
   same current Generation and `:as_of`. Missing projections are unknown, not
   zero history. Only work supporting this accepted objective/index is valued.
 
@@ -2416,7 +2417,8 @@ defmodule SpaceTraders.FleetPlanning do
         fuel: Map.get(ship, :fuel),
         waypoint: Map.get(ship, :waypoint),
         position: Map.get(ship, :position),
-        flight_mode: Map.get(ship, :flight_mode)
+        flight_mode: Map.get(ship, :flight_mode),
+        engine: Map.get(ship, :engine)
       }
     end)
     |> Enum.sort_by(&to_string(&1.symbol))
@@ -2685,6 +2687,8 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   defp candidate_routes(markets, revision, objective_index, objective, snapshot) do
+    snapshot = Map.put(snapshot, :fuel_price, fuel_price(markets))
+
     candidates =
       for source <- markets,
           destination <- markets,
@@ -2721,7 +2725,11 @@ defmodule SpaceTraders.FleetPlanning do
     candidates
     |> Enum.uniq_by(& &1.id)
     |> Enum.sort_by(fn candidate ->
+      rate = candidate.expected_outcomes.net_credits_per_ship_hour
+
       {
+        is_nil(rate),
+        -(rate || 0),
         -candidate.expected_outcomes.maximum_credit_change,
         -candidate.expected_outcomes.credit_change_per_unit,
         candidate.source_waypoint,
@@ -2778,6 +2786,10 @@ defmodule SpaceTraders.FleetPlanning do
       dependencies: dependencies
     }
 
+    # The estimate moves with every Ship's position, fuel and wear, so it
+    # stays out of the identity: the same trade keeps its Commitment.
+    estimate = trade_estimate(reaching, source, destination, units, spread, snapshot)
+
     %CandidateContribution{
       id: Evidence.fingerprint(identity),
       strategy_revision_id: revision.id,
@@ -2787,7 +2799,11 @@ defmodule SpaceTraders.FleetPlanning do
       trade_symbol: source_good.symbol,
       source_waypoint: source.waypoint,
       destination_waypoint: destination.waypoint,
-      expected_outcomes: expected_outcomes,
+      expected_outcomes:
+        Map.merge(expected_outcomes, %{
+          net_credits_per_ship_hour: Map.get(estimate, :net_credits_per_ship_hour),
+          trade_estimate: estimate
+        }),
       uncertainty: %{
         source_evidence_age_seconds: source.evidence_age_seconds,
         destination_evidence_age_seconds: destination.evidence_age_seconds,
@@ -2817,6 +2833,65 @@ defmodule SpaceTraders.FleetPlanning do
       },
       alternatives: []
     }
+  end
+
+  # Net credits per Ship-hour for the best reaching Ship (`TradeEstimate`):
+  # its empty leg to the source, then the loaded leg, in CRUISE.
+  defp trade_estimate(nil, _source, _destination, _units, _spread, _snapshot),
+    do: %{state: :unknown, reason: :no_ship_evidence}
+
+  defp trade_estimate(ships, source, destination, units, spread, snapshot) do
+    coordinates = snapshot.waypoint_coordinates
+
+    estimates =
+      Enum.map(ships, fn ship ->
+        TradeEstimate.trade(%{
+          ship: %{
+            speed: get_in(ship, [:engine, :speed]),
+            condition: get_in(ship, [:engine, :condition]),
+            fuel_capacity: get_in(ship, [:fuel, :capacity]),
+            position: ship_position(ship, source.waypoint, coordinates)
+          },
+          source: coordinates[source.waypoint],
+          destination: coordinates[destination.waypoint],
+          units: units,
+          spread: spread,
+          fuel_price: snapshot.fuel_price
+        })
+        |> case do
+          {:ok, estimate} -> {:ok, Map.put(estimate, :ship, ship.symbol)}
+          error -> error
+        end
+      end)
+
+    case for({:ok, estimate} <- estimates, do: estimate) do
+      [] ->
+        {:error, reason} = hd(estimates)
+        %{state: :unknown, reason: reason}
+
+      known ->
+        known
+        |> Enum.max_by(& &1.net_credits_per_ship_hour)
+        |> Map.put(:state, :estimated)
+    end
+  end
+
+  defp ship_position(%{waypoint: waypoint}, waypoint, _coordinates), do: :source
+
+  defp ship_position(%{position: %{x: x, y: y}}, _source, _coordinates)
+       when is_integer(x) and is_integer(y),
+       do: %{x: x, y: y}
+
+  defp ship_position(ship, _source, coordinates), do: coordinates[Map.get(ship, :waypoint)]
+
+  # The dearest fresh FUEL price among the Markets planned on: a cautious
+  # price for fuel bought anywhere along the trade.
+  defp fuel_price(markets) do
+    markets
+    |> Enum.flat_map(& &1.trade_goods)
+    |> Enum.filter(&(&1.symbol == "FUEL"))
+    |> Enum.map(& &1.purchase_price)
+    |> Enum.max(fn -> nil end)
   end
 
   # Allocation may claim only a Ship Planning found able to reach the route.

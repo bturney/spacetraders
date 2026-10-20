@@ -404,13 +404,9 @@ defmodule SpaceTraders.MutationAttempts do
     end)
   end
 
-  @doc "Retires unused proven-absence retry permission when its owner remains Emergency Stopped."
-  def retire_stopped_retry(%Attempt{} = attempt),
-    do: retire_unused_retry(attempt, "retired_while_emergency_stopped")
-
   @doc "Retires unused absence permission after the selected owner's admission refuses authority."
   def retire_unused_retry(%Attempt{} = attempt, disposition)
-      when disposition in ["retired_while_emergency_stopped", "retired_authority_unavailable"] do
+      when disposition == "retired_authority_unavailable" do
     Repo.transaction(fn ->
       SpaceTraders.CreditSpending.lock_agent(attempt)
       current = locked_attempt(attempt.id)

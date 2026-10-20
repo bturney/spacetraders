@@ -2,7 +2,7 @@ defmodule SpaceTraders.MissionControl.Channels do
   @moduledoc """
   Deployment-wide Mission Control notification channels.
 
-  Strategy and Operator condition changes are deployment events: one
+  Strategy changes are deployment events: one
   subscription serves every authenticated surface, with no tenant in the topic
   or payload. Messages are prompts to re-read the shared projection, never
   authority or data.
@@ -13,21 +13,21 @@ defmodule SpaceTraders.MissionControl.Channels do
 
   @pubsub SpaceTraders.PubSub
   @strategy "fleet_strategy"
-  @conditions "mission_conditions"
+  @earnings "earnings"
 
-  @doc "Subscribes the caller to deployment Fleet Strategy and Emergency Stop changes."
+  @doc "Subscribes the caller to deployment Fleet Strategy changes."
   def subscribe_strategy, do: Phoenix.PubSub.subscribe(@pubsub, @strategy)
 
-  @doc "Announces a deployment Fleet Strategy or Emergency Stop change."
+  @doc "Announces a deployment Fleet Strategy change."
   def broadcast_strategy,
     do: Phoenix.PubSub.broadcast(@pubsub, @strategy, :fleet_strategy_updated)
 
-  @doc "Subscribes the caller to deployment Attention and Intervention changes."
-  def subscribe_conditions, do: Phoenix.PubSub.subscribe(@pubsub, @conditions)
+  @doc "Subscribes the caller to committed Earnings records."
+  def subscribe_earnings, do: Phoenix.PubSub.subscribe(@pubsub, @earnings)
 
-  @doc "Announces a deployment Attention or Intervention change."
-  def broadcast_conditions,
-    do: Phoenix.PubSub.broadcast(@pubsub, @conditions, :mission_conditions_updated)
+  @doc "Announces a committed Earnings record: a prompt to re-read, never data."
+  def broadcast_earnings,
+    do: Phoenix.PubSub.broadcast(@pubsub, @earnings, :earnings_recorded)
 
   @doc "Subscribes the caller to current-Fleet allocation outbox notifications."
   def subscribe_allocation, do: Phoenix.PubSub.subscribe(@pubsub, "fleet_allocation")

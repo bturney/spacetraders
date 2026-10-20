@@ -1,5 +1,7 @@
 # Strategic observability and Operator experience — evidence/gap analysis
 
+> **Retired (spec [#757](https://github.com/bturney/spacetraders/issues/757)):** Operator surfaces are now Glance, Ships, Ship + Why and Stats; Attention, Intervention, Operations/Activity and TradeProgress are gone (receipts live in Earnings records, `SpaceTraders.Outcomes.Earnings`). Kept as historical evidence only; do not plan from it.
+
 > **Status:** Non-normative design evidence for [#502](https://github.com/bturney/spacetraders/issues/502) C09/C10 and the accepted [#311](https://github.com/bturney/spacetraders/issues/311) information architecture. Companion to [strategic reasoning scenarios](strategic-reasoning-scenarios.md) (SR-01–SR-08). **Not** a PRD, new navigation model, new implementation roadmap, approved dashboard redesign, instrumentation mandate, or modification to Standing Authority.
 >
 > **Reviewed:** 2026-10-11. SpaceTraders source and existing documentation, plus dashboard JSON provisioned in the sibling `bturney/home-server-setup` repository. This is a **source-level inventory**, not a runtime screenshot review, Prometheus data audit, or proof that live dashboards are populated. Verify against current branches and deployed data at implementation time.
@@ -18,7 +20,7 @@ The target is **understandability attached to every qualified capability**, not 
 
 ## Evidence vocabulary and gap classes
 
-Use project terms in [GLOSSARY](../../GLOSSARY.md): Strategic Objective, Candidate Contribution, Fleet Commitment, Strategy Decision Episode, Net Earnings, Episode Cash Flow, Observation Demand, Binding, Attention, Intervention, Neutral Wait, and Shared World State.
+Use project terms in [glossary map](../../GLOSSARY-MAP.md): Strategic Objective, Candidate Contribution, Fleet Commitment, Strategy Decision Episode, Net Earnings, Episode Cash Flow, Observation Demand, Binding, Neutral Wait, and Shared World State.
 
 Each suggested feature should classify its need:
 
@@ -35,12 +37,12 @@ A desired chart often has *two* statuses: the underlying **game outcome** may be
 
 ### App views and causal data
 
-- [`MissionControlLive`](../../lib/spacetraders_web/live/mission_control_live.ex) shows Strategy/Generation context, objective evaluations, Attention, market expected change versus receipt-backed Trade Margin / Net Earnings, observation-only spending, allocation dispositions (including stall, Shortfall, Capacity Deferral, Neutral Wait, Unallocated), and noteworthy Activity.
-- [`OperationsLive`](../../lib/spacetraders_web/live/operations_live.ex) exposes Objective-grouped Endeavors and linked released-work evidence; [`ActivityLive`](../../lib/spacetraders_web/live/activity_live.ex) separates consequential events from raw API traffic; [`GenerationsLive`](../../lib/spacetraders_web/live/generations_live.ex) includes bounded historical comparisons.
+- [`MissionControlLive`](../../lib/spacetraders_web/live/mission_control_live.ex) shows Strategy/Generation context, objective evaluations, market expected change versus receipt-backed Trade Margin / Net Earnings, observation-only spending, allocation dispositions (including stall, Shortfall, Capacity Deferral, Neutral Wait, Unallocated), and noteworthy Activity.
+- [`GenerationsLive`](../../lib/spacetraders_web/live/generations_live.ex) includes bounded historical comparisons.
 - [`DecisionEpisodeLive`](../../lib/spacetraders_web/live/decision_episode_live.ex) already shows classification, calibration version, expected and actual outcome maps, retained evidence references, and contextual Grafana links.
 - [`MissionControl.decision_episode_projection`](../../lib/spacetraders/mission_control.ex) exposes **alternatives and binding constraints** as well. Their omission from the concise Decision Episode view is a **presentation opportunity**, not by itself a reason to add new permanent tables.
 - [`GrafanaLink`](../../lib/spacetraders_web/grafana_link.ex) scopes links with Generation, Revision, Decision Episode, Commitment, Intent, and MutationAttempt identities and time windows. Retain this traceability.
-- [`TradeProgress`](../../lib/spacetraders/fleet_allocation/trade_progress.ex) attributes qualifying Market trades and supporting refuel/jump charges to their recorded root outcomes. Unknown monetary gaps remain unknown. This currently does **not** prove the full producer–hauler economics in SR-07.
+- [`Earnings`](../../lib/spacetraders/outcomes/earnings.ex) attributes qualifying Market trades and supporting refuel/jump charges to their recorded root outcomes. Unknown monetary gaps remain unknown. This currently does **not** prove the full producer–hauler economics in SR-07.
 
 ### Prometheus / logs
 
@@ -95,7 +97,7 @@ These are **candidate panels and proof questions**, not a requirement to impleme
 ### Economics and Capital
 
 - Desired: observed balance/floor/headroom and exposure **at the same authoritative boundary**; actual contribution Net Earnings versus supporting spend; observation-only spend kept separate; forecast-error cohorts where attribution is complete.
-- Reuse: Outcomes credit plots, gross transaction counters, Episode/TradeProgress receipts. Add only proven, bounded aggregates; do not make per-episode IDs Prometheus labels.
+- Reuse: Outcomes credit plots, gross transaction counters, Episode/Earnings record receipts. Add only proven, bounded aggregates; do not make per-episode IDs Prometheus labels.
 - Avoid: summing unrelated gross sales/refuels into “profit”; showing a guessed in-flight balance after missing authoritative reads. “Credits/hr” from consecutive observations is **not** a Ship's productive earnings rate.
 
 ### Fleet and Logistics
@@ -225,7 +227,7 @@ Suggested investigations, *if their source models later exist*: market quote for
 - Accepted UX target: [#311](https://github.com/bturney/spacetraders/issues/311), especially Mission Control, Operations, World, Explainability, Activity, Generations and Grafana handoff.
 - Strategic examples: [SR-01–SR-08](strategic-reasoning-scenarios.md).
 - Existing guides: [Observability](observability.md), [Outcome metrics](outcome-metrics.md), [Testing](testing.md).
-- App sources: [Mission Control](../../lib/spacetraders_web/live/mission_control_live.ex), [Decision Episode](../../lib/spacetraders_web/live/decision_episode_live.ex), [Operations](../../lib/spacetraders_web/live/operations_live.ex), [Grafana links](../../lib/spacetraders_web/grafana_link.ex), [Market economics](../../lib/spacetraders/fleet_allocation/trade_progress.ex).
+- App sources: [Mission Control](../../lib/spacetraders_web/live/mission_control_live.ex), [Decision Episode](../../lib/spacetraders_web/live/decision_episode_live.ex), [Grafana links](../../lib/spacetraders_web/grafana_link.ex), [Market economics](../../lib/spacetraders/outcomes/earnings.ex).
 - Dashboard source: [home-server-setup provisioned Grafana dashboards](https://github.com/bturney/home-server-setup/tree/main/config/observability/grafana/provisioning/dashboards).
 
 **Review goal:** confirm every source/instrumentation claim, retain the #311/#502 authority boundary, and preserve questions and illustrative design evidence without creating another implementation backlog.

@@ -1,5 +1,4 @@
 defmodule SpaceTradersWeb.StrategyLiveTest do
-  # Emergency Stop interactions use the application-wide admission server.
   use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
@@ -9,7 +8,6 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.Intelligence
-  alias SpaceTraders.Repo
 
   setup :register_and_log_in_operator
 
@@ -19,27 +17,14 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert {:error, {:redirect, %{to: "/operators/log-in"}}} = live(conn, ~p"/strategy")
   end
 
-  test "engages and explicitly resumes a durable Emergency Stop", %{
-    conn: conn,
-    scope: scope
-  } do
-    {:ok, view, _html} = live(conn, ~p"/strategy")
+  test "offers no in-app Emergency Stop; stopping the service is the kill switch", %{conn: conn} do
+    {:ok, view, html} = live(conn, ~p"/strategy")
 
-    view |> element("#engage-emergency-stop") |> render_click()
-    assert render(view) =~ "Emergency Stop engaged"
-    assert %DateTime{} = FleetStrategy.get(scope).emergency_stopped_at
-
-    GenServer.stop(view.pid, :normal)
-    {:ok, reconnected, html} = live(conn, ~p"/strategy")
-    assert html =~ "Gameplay mutations are suppressed"
-
-    reconnected |> element("#resume-from-emergency-stop") |> render_click()
-    assert render(reconnected) =~ "Fresh planning must select an admissible plan"
-    assert %DateTime{} = FleetStrategy.get(scope).emergency_stopped_at
-    assert %DateTime{} = FleetStrategy.get(scope).emergency_resume_prepared_at
+    refute html =~ "Emergency Stop"
+    refute has_element?(view, "#emergency-stop-control")
   end
 
-  test "a revoked or missing session reaches no Strategy or Emergency Stop command", %{
+  test "a revoked or missing session reaches no Strategy command", %{
     conn: conn
   } do
     assert {:error, {:redirect, %{to: "/operators/log-in"}}} =
@@ -50,56 +35,9 @@ defmodule SpaceTradersWeb.StrategyLiveTest do
     assert {:error, {:redirect, %{to: "/operators/log-in"}}} = live(conn, ~p"/strategy")
 
     assert {:error, :unauthenticated} =
-             FleetStrategy.engage_emergency_stop(%SpaceTraders.Agent.Scope{})
-
-    assert {:error, :unauthenticated} =
              FleetStrategy.save_draft(%SpaceTraders.Agent.Scope{}, %{}, 0)
 
-    assert %{draft: nil, emergency_stopped_at: nil, active_revision: nil} = FleetStrategy.get()
-  end
-
-  test "an Emergency Stop engaged from Strategy persists across restart and suppresses minting",
-       %{
-         conn: conn,
-         operator: operator
-       } do
-    {:ok, _operator} =
-      SpaceTraders.Agent.link_account_token(
-        SpaceTraders.Agent.Scope.for_operator(operator),
-        "STOP_RESTART_ACCOUNT_TOKEN"
-      )
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      flunk("Emergency Stop must suppress #{conn.method} #{conn.request_path}")
-    end)
-
-    {:ok, view, _html} = live(conn, ~p"/strategy")
-    view |> element("#engage-emergency-stop") |> render_click()
-    GenServer.stop(view.pid, :normal)
-
-    # Process-local admission is rebuilt from durable intent, as on application boot.
-    alias SpaceTraders.EmergencyStopAdmission
-    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, EmergencyStopAdmission)
-    {:ok, _pid} = Supervisor.restart_child(SpaceTraders.Supervisor, EmergencyStopAdmission)
-
-    assert {:error, :emergency_stopped} =
-             EmergencyStopAdmission.mutation_allowed?("STOP_RESTART_ACCOUNT_TOKEN")
-
-    {:ok, mission_control, _html} = live(conn, ~p"/mission-control")
-    assert has_element?(mission_control, "#operating-health", "STOPPED")
-
-    {:ok, strategy, html} = live(conn, ~p"/strategy")
-    assert html =~ "Gameplay mutations are suppressed"
-    assert has_element?(strategy, "#resume-from-emergency-stop")
-
-    {:ok, mint, _html} = live(conn, ~p"/agents/new")
-
-    assert mint
-           |> form("#mint_form", %{"agent" => %{"symbol" => "STOPPED1", "faction" => "COSMIC"}})
-           |> render_submit() =~ "Emergency Stop is engaged. Minting is suppressed"
-
-    refute Repo.get_by(AgentRecord, symbol: "STOPPED1")
-    assert {:ok, %{state: :empty}} = SpaceTraders.FleetGeneration.current_fleet()
+    assert %{draft: nil, active_revision: nil} = FleetStrategy.get()
   end
 
   test "discloses each preset's ordered objectives, Hard Constraints, Preferences, and consequences",

@@ -56,8 +56,7 @@ defmodule SpaceTraders.FleetAcquisition do
              :purchase_precondition_unmet,
              :ship_offer_evidence_unavailable,
              :strategy_revision_superseded,
-             :strategy_revision_absent,
-             :emergency_stopped
+             :strategy_revision_absent
            ] ->
         # Only definitive, pre-Attempt refusals end the published investment.
         # Transient/capacity read failures retain it; a dispatched Attempt always
@@ -163,7 +162,7 @@ defmodule SpaceTraders.FleetAcquisition do
   end
 
   # Current authority, not the authority the purchase was prepared under: the
-  # active, un-stopped Revision supplies the floor, and a purchase prepared
+  # active Revision supplies the floor, and a purchase prepared
   # under any other Revision is withdrawn rather than sent.
   defp current_purchase_authority(%Attempt{agent_id: agent_id} = attempt) do
     operator_id = Repo.one!(from a in Agent, where: a.id == ^agent_id, select: a.operator_id)
@@ -173,9 +172,6 @@ defmodule SpaceTraders.FleetAcquisition do
         Repo.one(from s in Strategy, where: s.operator_id == ^operator_id, lock: "FOR SHARE")
 
     case strategy do
-      %Strategy{emergency_stopped_at: stopped} when not is_nil(stopped) ->
-        {:error, :emergency_stopped}
-
       %Strategy{active_revision_id: id} when not is_nil(id) ->
         if attempt.strategy_revision_id in [nil, id],
           do: {:ok, Repo.get!(Revision, id)},
@@ -440,7 +436,7 @@ defmodule SpaceTraders.FleetAcquisition do
   defp readiness_matches?(ready, requirements) when is_map(ready) and is_map(requirements) do
     requirements = SpaceTraders.FleetAllocation.JsonEvidence.dump(requirements)
     configuration = SpaceTraders.FleetPlanning.ShipInvestment.configuration(ready)
-    profile = SpaceTraders.FleetAllocation.MarketWorkRate.ship_profile(ready)
+    profile = work_profile(ready)
 
     with %{} = promised <- requirements["configuration"],
          %{} = benchmark <- requirements["work_profile"],
@@ -460,6 +456,24 @@ defmodule SpaceTraders.FleetAcquisition do
   end
 
   defp readiness_matches?(_ready, _requirements), do: false
+
+  # Where the purchased Ship stands and what it holds, in the shape of the
+  # offer's promised work profile.
+  defp work_profile(%{
+         nav: %{waypoint_symbol: waypoint, status: status},
+         cargo: %{capacity: capacity, units: units},
+         fuel: %{capacity: fuel_capacity, current: current},
+         cooldown: %{remaining_seconds: remaining}
+       }) do
+    %{
+      "navigation" => %{"waypoint_symbol" => waypoint, "status" => status},
+      "cargo" => %{"capacity" => capacity, "units" => units},
+      "fuel" => %{"capacity" => fuel_capacity, "current" => current},
+      "cooldown" => %{"remaining_seconds" => remaining}
+    }
+  end
+
+  defp work_profile(_ship), do: nil
 
   defp matches_fields?(actual, expected) when is_map(actual) and is_map(expected),
     do:

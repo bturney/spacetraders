@@ -1,9 +1,9 @@
 defmodule SpaceTraders.RealizedMarketEconomicsTest do
   @moduledoc """
-  Charge-at-purchase attribution of realized refuel charges (#689): each
-  refuel's realized charge belongs in full to the root Intent that issued it,
-  hence to that Intent's Fleet Commitment and original Decision Episode. Read
-  through the receipt-backed Trade Progress projection.
+  Charge-at-purchase attribution of realized refuel charges (#689) in
+  Earnings records (#766): each refuel's realized charge belongs in full to
+  the root Intent that issued it, hence to that Intent's Fleet Commitment and
+  its one Earnings record.
   """
   # Mission Control's current identity is a deployment-wide singleton.
   use SpaceTraders.DataCase, async: false
@@ -12,44 +12,56 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
   import SpaceTraders.RealizedEconomicsFixtures
 
   alias SpaceTraders.Agent.Scope
-  alias SpaceTraders.{Fleet, FleetAllocation, MissionControl}
+  alias SpaceTraders.{Fleet, FleetAllocation}
   alias SpaceTraders.FleetAllocation.{PortfolioCandidate, StrategyDecisionEpisode}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
+  alias SpaceTraders.Outcomes.Earnings
 
   @as_of ~U[2030-01-01 12:00:00Z]
+
+  defp record!(portfolio) do
+    FleetAllocation.record_trade_outcome(portfolio)
+    Earnings.for_portfolio(portfolio.id)
+  end
 
   describe "Net Earnings of a Completed Round Trip" do
     test "deducts the realized refuel charges its own root Intents issued" do
       %{portfolio: portfolio, commitment: commitment} = market_fixture()
       buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
-      refuel = refuel!(buy, 144)
+      refuel!(buy, 144)
       sell = trade_intent!(portfolio, commitment, "sell", 1_200, 40)
-      sell_refuel = refuel!(sell, 72)
+      refuel!(sell, 72)
 
-      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
+      assert [record] = record!(portfolio)
 
-      assert progress.trade_margin == 800
-      assert progress.net_earnings == 800 - 144 - 72
-      assert [trip] = progress.round_trips
-      assert trip.supporting_cost == 216
-      assert trip.net_earnings == 584
+      assert %{revenue: 1_200, goods_cost: 400, fuel_cost: 216, other_cost: 0, net_earnings: 584} =
+               record
 
-      assert [
-               %{
-                 mutation_attempt_id: refuel_id,
-                 operation_id: "refuel-ship",
-                 intent_id: buy_id,
-                 commitment_id: commitment_id,
-                 realized_charge: 144,
-                 observation_only: false
-               },
-               %{mutation_attempt_id: sell_refuel_id, intent_id: sell_id, realized_charge: 72}
-             ] = progress.supporting_charges
+      assert record.fleet_commitment_id == commitment.id
+    end
 
-      assert {refuel_id, sell_refuel_id} == {refuel.id, sell_refuel.id}
-      assert {buy_id, sell_id, commitment_id} == {buy.id, sell.id, commitment.id}
-      refute Enum.any?(progress.unknown, &(&1.item == "net_earnings"))
+    test "a jump charge is another cost, not fuel" do
+      %{portfolio: portfolio, commitment: commitment} = market_fixture()
+      buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
+      refuel!(buy, 50, operation_id: "jump-ship")
+      trade_intent!(portfolio, commitment, "sell", 1_200, 40)
+
+      assert [%{fuel_cost: 0, other_cost: 50, net_earnings: 750}] = record!(portfolio)
+    end
+
+    test "several purchases sold together are one Completed Round Trip" do
+      %{portfolio: portfolio, commitment: commitment} = market_fixture()
+      buy = trade_intent!(portfolio, commitment, "buy", 200, 20)
+      refuel!(buy, 144)
+      trade_intent!(portfolio, commitment, "buy", 200, 20)
+      trade_intent!(portfolio, commitment, "sell", 600, 20)
+      assert [] = record!(portfolio)
+
+      trade_intent!(portfolio, commitment, "sell", 600, 20)
+
+      assert [%{units: 40, revenue: 1_200, goods_cost: 400, net_earnings: 656}] =
+               record!(portfolio)
     end
   end
 
@@ -57,22 +69,12 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
     test "a scouting refuel is coverage's observation-only spending, not a later trade's cost" do
       %{portfolio: portfolio, commitment: commitment, scout: scout} = market_fixture()
       scouting = intent!(portfolio, scout, "acquire_intelligence", ship: "SHIP-1")
-      scouting_refuel = refuel!(scouting, 300)
+      refuel!(scouting, 300)
       # The same Ship then trades with the fuel the scout bought still aboard.
       trade_intent!(portfolio, commitment, "buy", 400, 40)
       trade_intent!(portfolio, commitment, "sell", 1_200, 40)
 
-      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
-
-      assert [%{net_earnings: 800, supporting_cost: 0}] = progress.round_trips
-      assert progress.net_earnings == 800
-      assert progress.observation_only_spending == 300
-      assert progress.episode_cash_flow == 1_200 - 400 - 300
-
-      assert [%{mutation_attempt_id: id, commitment_id: scout_id, observation_only: true}] =
-               progress.supporting_charges
-
-      assert {id, scout_id} == {scouting_refuel.id, scout.id}
+      assert [%{net_earnings: 800, fuel_cost: 0}] = record!(portfolio)
     end
 
     test "fuel left aboard for the next trip neither moves nor prorates the original refuel" do
@@ -80,6 +82,7 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
       buy = trade_intent!(first, commitment, "buy", 400, 40)
       refuel!(buy, 500)
       trade_intent!(first, commitment, "sell", 1_200, 40)
+      assert [%{net_earnings: 300}] = record!(first)
 
       # A later Decision Episode trades on the same Ship with no refuel of its own.
       second = publish!(fixture.scope, fixture.generation, fixture.revision, ["SHIP-1"], 1)
@@ -87,58 +90,10 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
       trade_intent!(second, next, "buy", 100, 10)
       trade_intent!(second, next, "sell", 300, 10)
 
-      first_progress = FleetAllocation.trade_progress(first.strategy_decision_episode_id)
-      second_progress = FleetAllocation.trade_progress(second.strategy_decision_episode_id)
-
-      assert first_progress.net_earnings == 800 - 500
-      assert second_progress.net_earnings == 200
-      assert second_progress.supporting_charges == []
-    end
-  end
-
-  describe "each realized charge counts once" do
-    test "repeated reads and boot reconciliation neither duplicate nor move a charge" do
-      %{scope: scope, portfolio: portfolio, commitment: commitment} = market_fixture()
-      buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
-      refuel!(buy, 144)
-      trade_intent!(portfolio, commitment, "sell", 1_200, 40)
-      episode_id = portfolio.strategy_decision_episode_id
-
-      first = FleetAllocation.trade_progress(episode_id)
-      assert :ok = FleetAllocation.reconcile_completed_outcomes()
-      assert :ok = FleetAllocation.reconcile_completed_outcomes()
-
-      assert FleetAllocation.trade_progress(episode_id) == first
-      assert first.net_earnings == 656
-
-      assert %{classification: :realized, actual_outcomes: outcomes} =
-               Repo.get!(StrategyDecisionEpisode, episode_id)
-
-      assert outcomes["net_earnings"] == 656
-      assert [%{"realized_charge" => 144}] = outcomes["supporting_charges"]
-
-      assert Enum.any?(
-               MissionControl.activity(scope),
-               &(&1[:summary] ==
-                   "Fleet decision realized 800 credits trade margin; 656 credits net earnings")
-             )
+      assert [%{net_earnings: 200, fuel_cost: 0}] = record!(second)
     end
 
-    test "an absent attempt and its authorized retry charge only the retry's receipt" do
-      %{portfolio: portfolio, commitment: commitment} = market_fixture()
-      buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
-      refuel!(buy, 144, state: "absent", realized: false)
-      retry = refuel!(buy, 144)
-      trade_intent!(portfolio, commitment, "sell", 1_200, 40)
-
-      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
-
-      assert [%{mutation_attempt_id: id}] = progress.supporting_charges
-      assert id == retry.id
-      assert progress.net_earnings == 656
-    end
-
-    test "inherited Cargo's new-Revision disposition sale keeps the original Episode's costs" do
+    test "inherited Cargo's new-Revision disposition sale keeps the original Commitment's costs" do
       %{portfolio: old, commitment: commitment} = fixture = market_fixture()
       buy = trade_intent!(old, commitment, "buy", 400, 40)
       refuel!(buy, 144)
@@ -150,179 +105,77 @@ defmodule SpaceTraders.RealizedMarketEconomicsTest do
       refuel!(sell, 72, strategy_revision_id: revision.id)
       new = publish!(fixture.scope, fixture.generation, revision, ["SHIP-1"], 1)
 
-      old_progress = FleetAllocation.trade_progress(old.strategy_decision_episode_id)
-      new_progress = FleetAllocation.trade_progress(new.strategy_decision_episode_id)
-
-      assert [%{purchase_cost: 400, sale_revenue: 1_200, net_earnings: 584}] =
-               old_progress.round_trips
-
-      assert old_progress.net_earnings == 584
-      assert new_progress.supporting_charges == []
-      assert new_progress.receipts == []
-      assert new_progress.episode_cash_flow == 0
+      assert [%{goods_cost: 400, revenue: 1_200, net_earnings: 584}] = record!(old)
+      assert [] = record!(new)
     end
   end
 
-  describe "missing evidence stays unknown, never zero" do
-    for {label, opts} <- [
-          {"a succeeded refuel without a realized receipt", [realized: false]},
-          {"a sent-or-unknown refuel", [state: "sent_or_unknown", realized: false]},
-          {"a bounded-unknown refuel", [state: "bounded_unknown", realized: false]},
-          {"an ambiguous refuel", [state: "ambiguous", realized: false]},
-          {"a refuel whose provenance names only an inferred Intent",
-           [inferred: true, realized: true]},
-          {"a historical refuel of unknown effect",
-           [operation_id: "historical-ship-action", realized: false]}
-        ] do
-      @opts opts
-      test "#{label} leaves Net Earnings and Episode Cash Flow unknown" do
-        %{portfolio: portfolio, commitment: commitment} = market_fixture()
-        buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
-        attempt = refuel!(buy, 144, unknown_opts(buy, @opts))
-        trade_intent!(portfolio, commitment, "sell", 1_200, 40)
-
-        progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
-
-        assert progress.trade_margin == 800
-        assert progress.net_earnings == "unknown"
-        assert progress.episode_cash_flow == "unknown"
-        assert [%{net_earnings: "unknown", supporting_cost: "unknown"}] = progress.round_trips
-
-        assert Enum.any?(
-                 progress.unknown,
-                 &(&1.item == "supporting_charge" and &1.mutation_attempt_id == attempt.id)
-               )
-
-        assert Enum.any?(progress.unknown, &(&1.item == "net_earnings"))
-      end
-    end
-
-    test "a trip whose trade attempts carry no root-Intent provenance is untraceable" do
+  describe "each realized charge counts once" do
+    test "repeated wakes and boot reconciliation write one record and classify the Episode" do
       %{portfolio: portfolio, commitment: commitment} = market_fixture()
-      trade_intent!(portfolio, commitment, "buy", 400, 40, attempt: false)
-      trade_intent!(portfolio, commitment, "sell", 1_200, 40, attempt: false)
-
-      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
-
-      assert progress.trade_margin == 800
-      assert progress.net_earnings == "unknown"
-      assert [%{supporting_cost: "unknown"}] = progress.round_trips
-      assert Enum.any?(progress.unknown, &(&1.item == "supporting_charge"))
-    end
-
-    for state <- ~w(prepared not_sent rejected absent) do
-      @state state
-      test "a #{state} refuel charged nothing, so a traceable trip stays exact" do
-        %{portfolio: portfolio, commitment: commitment} = market_fixture()
-        buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
-        refuel!(buy, 144, state: @state, realized: false)
-        trade_intent!(portfolio, commitment, "sell", 1_200, 40)
-
-        progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
-
-        assert progress.net_earnings == 800
-        assert progress.supporting_charges == []
-      end
-    end
-
-    test "an unproven multi-purchase trip keeps Net Earnings unknown despite known fuel" do
-      %{portfolio: portfolio, commitment: commitment} = market_fixture()
-      buy = trade_intent!(portfolio, commitment, "buy", 200, 20)
+      buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
       refuel!(buy, 144)
-      trade_intent!(portfolio, commitment, "buy", 200, 20)
       trade_intent!(portfolio, commitment, "sell", 1_200, 40)
+      episode_id = portfolio.strategy_decision_episode_id
 
-      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
+      assert :ok = FleetAllocation.reconcile_completed_outcomes()
+      assert :ok = FleetAllocation.reconcile_completed_outcomes()
+      assert [%{net_earnings: 656} = record] = record!(portfolio)
 
-      assert progress.trade_margin == "unknown"
-      assert progress.net_earnings == "unknown"
-      assert progress.episode_cash_flow == 1_200 - 400 - 144
+      assert %{classification: :realized, actual_outcomes: outcomes} =
+               Repo.get!(StrategyDecisionEpisode, episode_id)
+
+      assert outcomes["net_earnings"] == 656
+      assert outcomes["earnings_record_ids"] == [record.id]
     end
 
-    test "an unresolved purchase leaves Episode Cash Flow unknown" do
+    test "an absent attempt and its authorized retry charge only the retry's receipt" do
       %{portfolio: portfolio, commitment: commitment} = market_fixture()
-      buy = trade_intent!(portfolio, commitment, "buy", nil, 40, status: "active")
-      refuel!(buy, 0, operation_id: "purchase-cargo", state: "sent_or_unknown", realized: false)
+      buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
+      refuel!(buy, 144, state: "absent", realized: false)
+      refuel!(buy, 144)
+      trade_intent!(portfolio, commitment, "sell", 1_200, 40)
 
-      progress = FleetAllocation.trade_progress(portfolio.strategy_decision_episode_id)
+      assert [%{fuel_cost: 144, net_earnings: 656}] = record!(portfolio)
+    end
 
-      assert progress.episode_cash_flow == "unknown"
-      assert progress.supporting_charges == []
+    test "a refuel without a realized charge is no known amount and is left out" do
+      %{portfolio: portfolio, commitment: commitment} = market_fixture()
+      buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
+      refuel!(buy, 144, state: "ambiguous", realized: false)
+      trade_intent!(portfolio, commitment, "sell", 1_200, 40)
+
+      assert [%{fuel_cost: 0, net_earnings: 800}] = record!(portfolio)
     end
   end
 
-  describe "Mission Control realized economics" do
-    test "reports Net Earnings with references beside observation-only spending" do
-      %{scope: scope, portfolio: portfolio, commitment: commitment, scout: scout} =
-        market_fixture()
+  describe "a trip that never finishes" do
+    test "a purchase not yet sold writes nothing and keeps its Episode evaluating" do
+      %{portfolio: portfolio, commitment: commitment} = market_fixture()
+      trade_intent!(portfolio, commitment, "buy", 400, 40)
 
-      buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
-      refuel = refuel!(buy, 144)
-      trade_intent!(portfolio, commitment, "sell", 1_200, 40)
-      scouting = intent!(portfolio, scout, "acquire_intelligence", ship: "SHIP-2")
-      refuel!(scouting, 300)
+      assert [] = record!(portfolio)
 
-      realized = MissionControl.market_execution(scope).realized
-
-      assert realized.realized_trade_margin == 800
-      assert realized.net_earnings == 656
-      assert realized.supporting_cost == 144
-      assert realized.observation_only_spending == 300
-      assert realized.episode_cash_flow == 1_200 - 400 - 144 - 300
-      assert realized.generation_observation_only_spending == 300
-
-      assert [%{mutation_attempt_id: id, intent_id: buy_id, commitment_id: commitment_id}] =
-               Enum.reject(realized.supporting_charges, & &1.observation_only)
-
-      assert {id, buy_id, commitment_id} == {refuel.id, buy.id, commitment.id}
+      assert %{classification: :still_evaluating} =
+               Repo.get!(StrategyDecisionEpisode, portfolio.strategy_decision_episode_id)
     end
 
-    test "observation-only spending stays visible once no Portfolio is current" do
-      %{scope: scope, generation: generation, portfolio: portfolio, scout: scout} =
-        market_fixture()
-
-      scouting = intent!(portfolio, scout, "acquire_intelligence", ship: "SHIP-2")
-      refuel!(scouting, 300)
-      assert {:ok, _} = FleetAllocation.unwind_current_portfolio(scope, generation.id)
-
-      realized = MissionControl.market_execution(scope).realized
-
-      assert realized.net_earnings == nil
-      assert realized.generation_observation_only_spending == 300
-    end
-
-    test "an untraceable refuel leaves Net Earnings unknown, not zero" do
-      %{scope: scope, portfolio: portfolio, commitment: commitment} = market_fixture()
-      buy = trade_intent!(portfolio, commitment, "buy", 400, 40)
-      refuel!(buy, 144, realized: false)
+    test "a retired Generation's sale is cut off by the reset and writes nothing" do
+      %{portfolio: portfolio, commitment: commitment, generation: generation} = market_fixture()
+      trade_intent!(portfolio, commitment, "buy", 400, 40)
       trade_intent!(portfolio, commitment, "sell", 1_200, 40)
 
-      realized = MissionControl.market_execution(scope).realized
+      Generation
+      |> Repo.get!(generation.id)
+      |> Ecto.Changeset.change(retired_at: DateTime.utc_now())
+      |> Repo.update!()
 
-      assert realized.realized_trade_margin == 800
-      assert realized.net_earnings == nil
-      assert realized.supporting_cost == nil
-      assert Enum.any?(realized.unknown, &(&1.item == "net_earnings"))
+      assert :ok = FleetAllocation.reconcile_completed_outcomes()
+      assert [] = Earnings.list(generation.id)
     end
   end
 
   # -- fixtures --------------------------------------------------------------
-
-  defp unknown_opts(intent, opts) do
-    {inferred, opts} = Keyword.pop(opts, :inferred, false)
-
-    opts =
-      if Keyword.get(opts, :operation_id) == "historical-ship-action",
-        do:
-          Keyword.put(opts, :prepared_evidence, %{
-            "selected_action" => %{"kind" => "refuel", "waypoint" => "X1-A-buy"}
-          }),
-        else: opts
-
-    if inferred,
-      do: Keyword.put(opts, :provenance, %{"intent_id" => intent.id, "ship_symbol" => "SHIP-1"}),
-      else: opts
-  end
 
   defp activate_revision!(%{revision: previous, generation: generation}, number) do
     revision =

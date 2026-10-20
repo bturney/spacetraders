@@ -179,9 +179,13 @@ defmodule SpaceTraders.RuntimeFleetGame do
 
   defp respond(state, "GET", "/v2/my/agent", _, _), do: {{:ok, agent_json(state)}, state}
 
-  defp respond(state, "GET", "/v2/my/ships", _, _) do
+  # Pages like the game: 10 Ships unless the request asks for up to 20.
+  defp respond(state, "GET", "/v2/my/ships", _, params) do
+    page = params |> Map.get("page", "1") |> to_string() |> String.to_integer()
+    limit = params |> Map.get("limit", "10") |> to_string() |> String.to_integer() |> min(20)
     ships = state.ships |> Map.values() |> Enum.sort_by(& &1.symbol) |> Enum.map(&ship_json/1)
-    {{:ok, ships, %{"total" => length(ships), "page" => 1, "limit" => 20}}, state}
+    data = Enum.slice(ships, (page - 1) * limit, limit)
+    {{:ok, data, %{"total" => length(ships), "page" => page, "limit" => limit}}, state}
   end
 
   defp respond(state, "GET", "/v2/my/ships/" <> symbol, _, _) do

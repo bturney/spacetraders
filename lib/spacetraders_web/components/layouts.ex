@@ -35,35 +35,40 @@ defmodule SpaceTradersWeb.Layouts do
     default: false,
     doc: "use a wider content column (e.g. the fleet card grid dashboard)"
 
+  attr :active, :atom,
+    default: nil,
+    values: [nil, :glance, :ships, :stats],
+    doc: "the highlighted main destination"
+
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
-    <div class="min-h-screen bg-grid">
-      <header class="border-b border-base-300/70 bg-base-100/90 backdrop-blur">
-        <div class="mx-auto flex min-h-16 max-w-[1440px] items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
+    <div class="min-h-screen bg-base-100">
+      <header class="border-b border-line bg-base-100">
+        <div class="mx-auto flex min-h-14 max-w-[1360px] items-center justify-between gap-4 px-4 sm:px-6 lg:px-8">
           <.link navigate={~p"/mission-control"} class="flex min-w-0 items-center gap-3">
             <span class="brand-mark"><img src={~p"/images/logo.svg"} width="28" height="20" /></span>
-            <span class="min-w-0">
-              <span class="block truncate text-sm font-bold tracking-[0.18em] text-primary">SPACETRADERS</span>
-              <span class="hidden text-[10px] uppercase tracking-[0.24em] opacity-50 sm:block">Operator operations center</span>
-            </span>
+            <span class="truncate text-sm font-bold tracking-[0.18em] text-primary">SPACETRADERS</span>
           </.link>
           <nav class="flex items-center gap-1 sm:gap-2" aria-label="Operator navigation">
             <%= if @current_scope do %>
-              <span class="hidden max-w-44 truncate px-2 text-xs opacity-60 md:block">{@current_scope.operator.email}</span>
-              <.link
-                navigate={~p"/mission-control"}
-                class="hidden btn btn-sm btn-ghost md:inline-flex"
-              >Mission Control</.link>
-              <.link navigate={~p"/operations"} class="hidden btn btn-sm btn-ghost md:inline-flex">Operations</.link>
-              <.link navigate={~p"/world"} class="hidden btn btn-sm btn-ghost md:inline-flex">World</.link>
-              <.link navigate={~p"/strategy"} class="hidden btn btn-sm btn-ghost md:inline-flex">Strategy</.link>
-              <.link navigate={~p"/activity"} class="btn btn-sm btn-ghost md:hidden">Activity</.link>
-              <details class="dropdown dropdown-end">
-                <summary class="btn btn-sm btn-ghost">More</summary>
-                <ul class="menu dropdown-content z-20 w-52 rounded-xl border border-base-300 bg-base-100 p-2 shadow-lg">
-                  <li><.link navigate={~p"/activity"}>Activity</.link></li>
+              <div id="top-bar" class="hidden items-center gap-1 md:flex">
+                <.link
+                  navigate={~p"/mission-control"}
+                  class={["btn btn-sm btn-ghost", @active == :glance && "text-primary"]}
+                >Mission Control</.link>
+                <.link
+                  navigate={~p"/ships"}
+                  class={["btn btn-sm btn-ghost", @active == :ships && "text-primary"]}
+                >Ships</.link>
+              </div>
+              <details id="app-menu" class="dropdown dropdown-end">
+                <summary class="btn btn-sm btn-ghost">Menu</summary>
+                <ul class="menu dropdown-content z-20 w-52 rounded-box border border-line bg-base-200 p-2">
+                  <li class="px-3 py-1 text-xs text-dim">{@current_scope.operator.email}</li>
+                  <li><.link navigate={~p"/world"}>World</.link></li>
+                  <li><.link navigate={~p"/strategy"}>Strategy</.link></li>
                   <li><.link navigate={~p"/generations"}>Generations</.link></li>
                   <li><.link navigate={~p"/operators/settings"}>Settings</.link></li>
                   <li><.link href={~p"/operators/log-out"} method="delete">Log out</.link></li>
@@ -72,33 +77,57 @@ defmodule SpaceTradersWeb.Layouts do
             <% else %>
               <.link navigate={~p"/operators/log-in"} class="btn btn-sm btn-primary">Log in</.link>
             <% end %>
-            <.theme_toggle />
           </nav>
         </div>
       </header>
 
-      <nav
-        :if={@current_scope}
-        class="fixed inset-x-0 bottom-0 z-20 flex justify-around border-t border-base-300 bg-base-100 p-2 md:hidden"
-        aria-label="Primary navigation"
-      >
-        <.link navigate={~p"/mission-control"} class="btn btn-ghost btn-sm">Command</.link>
-        <.link navigate={~p"/operations"} class="btn btn-ghost btn-sm">Ops</.link>
-        <.link navigate={~p"/world"} class="btn btn-ghost btn-sm">World</.link>
-        <.link navigate={~p"/strategy"} class="btn btn-ghost btn-sm">Strategy</.link>
-      </nav>
-
-      <main class="mx-auto w-full max-w-[1440px] px-4 py-8 pb-24 sm:px-6 sm:py-10 md:pb-10 lg:px-8">
+      <main class="mx-auto w-full max-w-[1360px] px-4 py-4 pb-[72px] sm:px-6 sm:py-8 md:pb-10 lg:px-8">
         <div class={[@wide && "space-y-6", !@wide && "mx-auto max-w-2xl space-y-6"]}>
           {render_slot(@inner_block)}
         </div>
       </main>
-      <footer class="mx-auto max-w-[1440px] px-4 pb-8 text-xs uppercase tracking-[0.18em] opacity-40 sm:px-6 lg:px-8">
-        SpaceTraders operations center <span class="mx-2">/</span> keep learning, keep exploring
-      </footer>
+
+      <.phone_tabs :if={@current_scope} active={@active} />
     </div>
 
     <.flash_group flash={@flash} />
+    """
+  end
+
+  @doc """
+  Phone bottom tab bar: Glance | Ships | Stats. Built from Card and Eyebrow.
+  Hidden from the `md` breakpoint up, where the top bar takes over.
+  """
+  attr :active, :atom, default: nil
+
+  def phone_tabs(assigns) do
+    assigns =
+      assign(assigns, :tabs, [
+        {:glance, "Glance", ~p"/mission-control"},
+        {:ships, "Ships", ~p"/ships"},
+        {:stats, "Stats", "/stats"}
+      ])
+
+    ~H"""
+    <nav
+      id="phone-tabs"
+      class="fixed inset-x-0 bottom-0 z-20 md:hidden"
+      aria-label="Primary navigation"
+    >
+      <.card class="grid grid-cols-3 !rounded-none !border-x-0 !border-b-0 !bg-tabbar !p-0">
+        <.link
+          :for={{key, label, path} <- @tabs}
+          navigate={path}
+          aria-current={@active == key && "page"}
+          class={[
+            "flex min-h-12 items-center justify-center",
+            @active == key && "bg-base-300"
+          ]}
+        >
+          <.eyebrow class={@active == key && "!text-primary"}>{label}</.eyebrow>
+        </.link>
+      </.card>
+    </nav>
     """
   end
 
@@ -147,43 +176,6 @@ defmodule SpaceTradersWeb.Layouts do
         {gettext("Attempting to reconnect")}
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
-    </div>
-    """
-  end
-
-  @doc """
-  Provides dark vs light theme toggle based on themes defined in app.css.
-
-  See <head> in root.html.heex which applies the theme before page load.
-  """
-  def theme_toggle(assigns) do
-    ~H"""
-    <div class="theme-switcher card relative flex flex-row items-center border border-base-300 bg-base-200 rounded-full">
-      <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left]" />
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="system"
-      >
-        <.icon name="hero-computer-desktop-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="light"
-      >
-        <.icon name="hero-sun-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
-
-      <button
-        class="flex p-2 cursor-pointer w-1/3"
-        phx-click={JS.dispatch("phx:set-theme")}
-        data-phx-theme="dark"
-      >
-        <.icon name="hero-moon-micro" class="size-4 opacity-75 hover:opacity-100" />
-      </button>
     </div>
     """
   end

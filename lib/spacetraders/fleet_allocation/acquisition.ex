@@ -18,7 +18,7 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
     World
   }
 
-  alias SpaceTraders.FleetAllocation.{JsonEvidence, StrategyDecisionEpisode, TradeProgress}
+  alias SpaceTraders.FleetAllocation.{JsonEvidence, StrategyDecisionEpisode}
   alias SpaceTraders.FleetStrategy.StandingAuthority
 
   def reconcile(scope, agent, revision, system, capacity) do
@@ -58,10 +58,10 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
 
     fuel? =
       Enum.any?(work, fn work ->
-        Enum.any?(
-          get_in(work.expected_outcomes, ["planned_rate_evidence", "profiles"]) || [],
-          &(get_in(&1, ["fuel", "capacity"]) > 0)
-        )
+        case get_in(work.expected_outcomes, ["trade_estimate", "fuel_units"]) do
+          units when is_integer(units) -> units > 0
+          _ -> false
+        end
       end)
 
     operations = if fuel?, do: operations ++ ["refuel-ship"], else: operations
@@ -71,8 +71,7 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
   defp enabled_work_proceeds?(capacity, _work), do: FleetCapacity.proceed?(capacity)
 
   defp plan_and_publish(scope, agent, revision, generation, system, now, work) do
-    with :ok <- SpaceTraders.FleetStrategy.mutation_allowed?(),
-         {:ok, floor} <- StandingAuthority.credit_floor(revision),
+    with {:ok, floor} <- StandingAuthority.credit_floor(revision),
          {:ok, overview} <- Agent.agent_overview(agent),
          {:ok, ships} <- Fleet.list_ships(agent) do
       portfolio = FleetAllocation.current_portfolio(scope, agent)
@@ -101,7 +100,7 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
         shipyards: shipyards,
         unmet_work: work,
         generation_horizon: horizon,
-        realized_trade_progress: TradeProgress.for_generation(generation.id),
+        realized_earnings: SpaceTraders.Outcomes.Earnings.list(generation.id),
         waypoint_coordinates: world.waypoint_coordinates,
         fuel_stops: world.fuel_stops
       }

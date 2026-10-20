@@ -4,6 +4,8 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
 
   import SpaceTraders.ShipBody
 
+  @repo_query_event SpaceTraders.Repo.config()[:telemetry_prefix] ++ [:query]
+
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.API.Model
@@ -263,6 +265,48 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
            } = Repo.get!(Intent, intent.id)
 
     assert MutationAttempts.get!(attempt.id).state == "succeeded"
+  end
+
+  test "a blocked step stores its next attempt and retries itself with a growing wait" do
+    {agent, ship, portfolio, commitment} = claimed_ship("SCAN-RETRY")
+
+    {intent, attempt} =
+      selected_intelligence(agent, ship, portfolio, commitment, "scan_waypoints")
+
+    {:ok, attempt} = MutationAttempts.mark_sent_or_unknown(attempt)
+    {:ok, _} = MutationAttempts.record_outcome(attempt, :succeeded, %{status: 200})
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      Req.Test.json(conn, %{"data" => ship_body(ship.symbol)})
+    end)
+
+    before = DateTime.utc_now(:second)
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
+
+    blocked = Repo.get!(Intent, intent.id)
+    assert %Intent{status: "blocked", retries: 0, next_attempt_at: %DateTime{} = next} = blocked
+    assert DateTime.diff(next, before) in 60..62
+
+    assert [%Event{event_type: "intent_retry", due_at: due, payload: payload}] =
+             Timeline.pending_events(:ship, ship.symbol)
+
+    assert payload == %{"intent_id" => intent.id}
+    assert DateTime.compare(DateTime.truncate(due, :second), next) == :eq
+
+    # The retry finds the step still blocked: one retry, a longer wait.
+    retried = DateTime.utc_now(:second)
+    _ = Intents.reconcile(agent.id, ship.symbol, nil, :intent_retry, intent.id)
+
+    assert %Intent{status: "blocked", retries: 1, next_attempt_at: later} =
+             Repo.get!(Intent, intent.id)
+
+    assert DateTime.diff(later, retried) in 120..122
+
+    # Leaving blocked clears the retry state.
+    Repo.get!(Intent, intent.id) |> Intents.transition_intent(status: "active")
+
+    assert %Intent{status: "active", retries: 0, next_attempt_at: nil} =
+             Repo.get!(Intent, intent.id)
   end
 
   test "chart callback lacking required provenance keeps its selection without a second chart" do
@@ -957,462 +1001,8 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     end)
   end
 
-  # #654 agrees this seam: real Ship Execution -> outcome telemetry -> Prometheus.
-  test "confirmed purchases accumulate gross credits without a zero baseline or wake duplicates" do
-    start_transaction_metrics()
-    scrape = &transaction_metrics/0
-
-    series =
-      ~s(spacetraders_outcome_credits_transactions_total{intent_type="buy",operation="buy"})
-
-    refute scrape.() =~ series
-    refute scrape.() =~ ~s(spacetraders_outcome_observed_at_seconds{family="transactions"})
-
-    for {suffix, total, at} <- [{"FIRST", 50, 1_893_456_000}, {"SECOND", 100, 1_893_456_060}] do
-      {agent, ship, portfolio, commitment} = claimed_ship("OUTCOME-BUY-#{suffix}")
-      {intent, action} = market_selection(ship, portfolio, commitment, "buy")
-      {:ok, %{intent: selected}} = prepare_recorded(agent, intent, action)
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        data =
-          case {conn.method, conn.request_path} do
-            {"GET", "/v2/my/agent"} -> %{"symbol" => agent.symbol, "credits" => 1000}
-            {"GET", _} -> market_ship_body(ship, 0)
-            {"POST", _} -> trade_response(agent, ship, "PURCHASE", 10, 950, 5)
-          end
-
-        Req.Test.json(conn, %{"data" => data})
-      end)
-
-      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, selected.id)
-      assert Repo.get!(Intent, intent.id).status == "completed"
-      assert scrape.() =~ "#{series} #{total}\n"
-      assert scrape.() =~ "# TYPE spacetraders_outcome_credits_transactions_total counter\n"
-
-      assert transaction_metric_value(
-               ~s(spacetraders_outcome_observed_at_seconds{family="transactions"})
-             ) == at
-
-      assert_receive {:telemetry, [:spacetraders, :outcome, :transaction], %{credits: 50},
-                      metadata}
-
-      assert metadata == %{intent_type: "buy", operation: "buy"}
-
-      Req.Test.stub(SpaceTraders.API, fn _ -> flunk("completed purchase made another request") end)
-
-      _ = Intents.reconcile(agent.id, ship.symbol, nil, :arrival, selected.id)
-      assert scrape.() =~ "#{series} #{total}\n"
-      SpaceTraders.TestClock.advance(60)
-    end
-
-    SpaceTraders.TestClock.advance(600)
-
-    assert transaction_metric_value(
-             ~s(spacetraders_outcome_observed_at_seconds{family="transactions"})
-           ) == 1_893_456_060
-  end
-
-  test "a confirmed sale records receipts rather than an event count or the quoted price" do
-    start_transaction_metrics()
-    {agent, ship, portfolio, commitment} = claimed_ship("OUTCOME-SELL")
-    {intent, action} = market_selection(ship, portfolio, commitment, "sell")
-    {:ok, %{intent: selected}} = prepare_recorded(agent, intent, action)
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      data =
-        case {conn.method, conn.request_path} do
-          {"GET", "/v2/my/agent"} -> %{"symbol" => agent.symbol, "credits" => 1000}
-          {"GET", _} -> market_ship_body(ship, 5)
-          {"POST", _} -> trade_response(agent, ship, "SELL", 17, 1085, 0)
-        end
-
-      Req.Test.json(conn, %{"data" => data})
-    end)
-
-    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, selected.id)
-    assert Repo.get!(Intent, intent.id).status == "completed"
-
-    assert transaction_metrics() =~
-             ~s(spacetraders_outcome_credits_transactions_total{intent_type="sell",operation="sell"} 85\n)
-
-    assert_receive {:telemetry, [:spacetraders, :outcome, :transaction], %{credits: 85}, metadata}
-    assert metadata == %{intent_type: "sell", operation: "sell"}
-  end
-
-  test "a confirmed supporting refuel records its existing total under the root Intent type" do
-    start_transaction_metrics()
-    {agent, ship, portfolio, commitment} = claimed_ship("OUTCOME-REFUEL")
-    intent = owned_intent(ship, portfolio, commitment, [])
-
-    action = %{
-      "kind" => "refuel",
-      "waypoint" => "X1-UX81-A1",
-      "units" => 50,
-      "fuel_before" => 150
-    }
-
-    live = Model.Ship.from_json(ship_body(ship.symbol))
-
-    SpaceTraders.RecordedDispatchFixtures.retain_purchase_preflight(
-      agent,
-      intent.target_waypoint,
-      action
-    )
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      data =
-        case {conn.method, conn.request_path} do
-          {"GET", "/v2/my/agent"} ->
-            %{"symbol" => agent.symbol, "credits" => 965}
-
-          {"GET", _} ->
-            ship_body(ship.symbol, %{"fuel" => %{"current" => 200, "capacity" => 200}})
-
-          {"POST", _} ->
-            %{
-              "agent" => %{"symbol" => agent.symbol, "credits" => 965},
-              "fuel" => %{"current" => 200, "capacity" => 200},
-              "transaction" => %{
-                "type" => "PURCHASE",
-                "shipSymbol" => ship.symbol,
-                "tradeSymbol" => "FUEL",
-                "waypointSymbol" => "X1-UX81-A1",
-                "units" => 1,
-                "pricePerUnit" => 1,
-                "totalPrice" => 35
-              }
-            }
-        end
-
-      Req.Test.json(conn, %{"data" => data})
-    end)
-
-    _ = Intents.execute_action(agent, intent, live, action)
-    assert [attempt] = MutationAttempts.list_for_agent(agent)
-    assert attempt.state == "succeeded"
-
-    assert transaction_metrics() =~
-             ~s(spacetraders_outcome_credits_transactions_total{intent_type="navigate",operation="refuel"} 35\n)
-
-    assert_receive {:telemetry, [:spacetraders, :outcome, :transaction], %{credits: 35}, metadata}
-    assert metadata == %{intent_type: "navigate", operation: "refuel"}
-  end
-
-  test "supporting refuel receipts with mismatched goods, units or missing credits remain unknown" do
-    start_transaction_metrics()
-
-    for {field, value} <- [{"tradeSymbol", "IRON_ORE"}, {"units", 49}, {"credits", nil}] do
-      {agent, ship, portfolio, commitment} = claimed_ship("OUTCOME-REFUEL-#{field}")
-      intent = owned_intent(ship, portfolio, commitment, [])
-
-      action = %{
-        "kind" => "refuel",
-        "waypoint" => "X1-UX81-A1",
-        "units" => 50,
-        "fuel_before" => 150
-      }
-
-      live = Model.Ship.from_json(ship_body(ship.symbol))
-
-      SpaceTraders.RecordedDispatchFixtures.retain_purchase_preflight(
-        agent,
-        intent.target_waypoint,
-        action
-      )
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        data =
-          case {conn.method, conn.request_path} do
-            {"GET", "/v2/my/agent"} ->
-              %{"symbol" => agent.symbol, "credits" => 965}
-
-            {"GET", _} ->
-              ship_body(ship.symbol, %{"fuel" => %{"current" => 200, "capacity" => 200}})
-
-            {"POST", _} ->
-              receipt = %{
-                "agent" => %{"symbol" => agent.symbol, "credits" => 965},
-                "fuel" => %{"current" => 200, "capacity" => 200},
-                "transaction" => %{
-                  "type" => "PURCHASE",
-                  "shipSymbol" => ship.symbol,
-                  "tradeSymbol" => "FUEL",
-                  "waypointSymbol" => "X1-UX81-A1",
-                  "units" => 1,
-                  "pricePerUnit" => 1,
-                  "totalPrice" => 35
-                }
-              }
-
-              if field == "credits",
-                do: put_in(receipt, ["agent", field], value),
-                else: put_in(receipt, ["transaction", field], value)
-          end
-
-        Req.Test.json(conn, %{"data" => data})
-      end)
-
-      _ = Intents.execute_action(agent, intent, live, action)
-      assert [attempt] = MutationAttempts.list_for_agent(agent)
-      assert attempt.state == "succeeded"
-      assert SpaceTraders.CreditCalibration.realization(attempt) == nil
-      refute transaction_metrics() =~ "spacetraders_outcome_credits_transactions_total"
-
-      refute transaction_metrics() =~
-               ~s(spacetraders_outcome_observed_at_seconds{family="transactions"})
-
-      refute_receive {:telemetry, [:spacetraders, :outcome, :transaction], _, _}
-    end
-  end
-
-  test "a module modification receipt remains counted after the root completes from a Ship read" do
-    start_transaction_metrics()
-    {agent, ship, intent} = execute_module_receipt("MODULE_SURVEY_SUITE_I")
-    assert Repo.get!(Intent, intent.id).status == "completed"
-
-    assert transaction_metrics() =~
-             ~s(spacetraders_outcome_credits_transactions_total{intent_type="install_module",operation="install_module"} 125\n)
-
-    assert_receive {:telemetry, [:spacetraders, :outcome, :transaction], %{credits: 125},
-                    metadata}
-
-    assert metadata == %{intent_type: "install_module", operation: "install_module"}
-
-    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("completed modification acquired new facts") end)
-
-    _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
-
-    assert transaction_metrics() =~
-             ~s(spacetraders_outcome_credits_transactions_total{intent_type="install_module",operation="install_module"} 125\n)
-  end
-
-  test "a receipt for another module cannot count despite authoritative root completion" do
-    start_transaction_metrics()
-    {agent, _ship, intent} = execute_module_receipt("MODULE_MINERAL_PROCESSOR_I")
-    assert Repo.get!(Intent, intent.id).status == "completed"
-    assert [attempt] = MutationAttempts.list_for_agent(agent)
-    assert SpaceTraders.CreditCalibration.realization(attempt) == nil
-    refute transaction_metrics() =~ "spacetraders_outcome_credits_transactions_total"
-
-    refute transaction_metrics() =~
-             ~s(spacetraders_outcome_observed_at_seconds{family="transactions"})
-
-    refute_receive {:telemetry, [:spacetraders, :outcome, :transaction], _, _}
-  end
-
-  defp execute_module_receipt(receipt_module) do
-    {agent, ship, portfolio, commitment} = claimed_ship("OUTCOME-MODULE")
-    module = "MODULE_SURVEY_SUITE_I"
-
-    intent =
-      owned_intent(ship, portfolio, commitment,
-        type: "install_module",
-        parameters: %{"module_symbol" => module}
-      )
-
-    action = %{
-      "kind" => "install_module",
-      "module_symbol" => module,
-      "quantity" => 1,
-      "waypoint" => "X1-UX81-A1",
-      "installed_before" => 0,
-      "cargo_before" => 1
-    }
-
-    before =
-      ship_body(ship.symbol, %{
-        "cargo" => %{
-          "capacity" => 40,
-          "units" => 1,
-          "inventory" => [%{"symbol" => module, "units" => 1}]
-        }
-      })
-
-    after_body =
-      ship_body(ship.symbol, %{
-        "modules" => [%{"symbol" => module}],
-        "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
-      })
-
-    SpaceTraders.RecordedDispatchFixtures.retain_modification_preflight(agent, "X1-UX81-A1")
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      data =
-        case {conn.method, conn.request_path} do
-          {"GET", "/v2/my/agent"} ->
-            %{"symbol" => agent.symbol, "credits" => 999_875}
-
-          {"GET", _} ->
-            after_body
-
-          {"POST", _} ->
-            %{
-              "agent" => %{"symbol" => agent.symbol, "credits" => 999_875},
-              "modules" => after_body["modules"],
-              "cargo" => after_body["cargo"],
-              "transaction" => %{
-                "shipSymbol" => ship.symbol,
-                "tradeSymbol" => receipt_module,
-                "waypointSymbol" => "X1-UX81-A1",
-                "totalPrice" => 125
-              }
-            }
-        end
-
-      Req.Test.json(conn, %{"data" => data})
-    end)
-
-    _ = Intents.execute_action(agent, intent, Model.Ship.from_json(before), action)
-    {agent, ship, intent}
-  end
-
-  test "rejected or unattributed receipts and price-unknown recovery create no transaction series" do
-    start_transaction_metrics()
-
-    for scenario <- [:rejected, :unattributed, :missing_total, :invalid_total, :recovered] do
-      {agent, ship, portfolio, commitment} = claimed_ship("OUTCOME-UNKNOWN-#{scenario}")
-      {intent, action} = market_selection(ship, portfolio, commitment, "buy")
-      {:ok, %{intent: selected, attempt: attempt}} = prepare_recorded(agent, intent, action)
-      if scenario == :recovered, do: MutationAttempts.mark_sent_or_unknown(attempt)
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        case {conn.method, conn.request_path} do
-          {"GET", "/v2/my/agent"} ->
-            Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 950}})
-
-          {"GET", _} ->
-            Req.Test.json(conn, %{
-              "data" => market_ship_body(ship, if(scenario == :recovered, do: 5, else: 0))
-            })
-
-          {"POST", _} when scenario == :rejected ->
-            conn
-            |> Plug.Conn.put_status(403)
-            |> Req.Test.json(%{"error" => %{"code" => 403, "message" => "forbidden"}})
-
-          {"POST", _} when scenario == :unattributed ->
-            data =
-              trade_response(agent, ship, "PURCHASE", 10, 950, 5)
-              |> put_in(["transaction", "shipSymbol"], "OTHER-SHIP")
-
-            Req.Test.json(conn, %{"data" => data})
-
-          {"POST", _} when scenario in [:missing_total, :invalid_total] ->
-            data =
-              trade_response(agent, ship, "PURCHASE", 10, 950, 5)
-              |> put_in(
-                ["transaction", "totalPrice"],
-                if(scenario == :missing_total, do: nil, else: -50)
-              )
-
-            Req.Test.json(conn, %{"data" => data})
-        end
-      end)
-
-      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, selected.id)
-      if scenario == :recovered, do: assert(Repo.get!(Intent, intent.id).status == "completed")
-      refute transaction_metrics() =~ "spacetraders_outcome_credits_transactions_total"
-
-      refute transaction_metrics() =~
-               ~s(spacetraders_outcome_observed_at_seconds{family="transactions"})
-
-      refute_receive {:telemetry, [:spacetraders, :outcome, :transaction], _, _}
-    end
-  end
-
-  test "a broken transaction subscriber cannot interrupt confirmed Ship execution" do
-    start_transaction_metrics()
-    handler = {__MODULE__, :broken_transaction, make_ref()}
-
-    :ok =
-      :telemetry.attach(
-        handler,
-        [:spacetraders, :outcome, :transaction],
-        &__MODULE__.broken_transaction_handler/4,
-        nil
-      )
-
-    on_exit(fn -> :telemetry.detach(handler) end)
-    {agent, ship, portfolio, commitment} = claimed_ship("OUTCOME-FAIL-SOFT")
-    {intent, action} = market_selection(ship, portfolio, commitment, "buy")
-    {:ok, %{intent: selected}} = prepare_recorded(agent, intent, action)
-
-    Req.Test.stub(SpaceTraders.API, fn conn ->
-      data =
-        case {conn.method, conn.request_path} do
-          {"GET", "/v2/my/agent"} -> %{"symbol" => agent.symbol, "credits" => 1000}
-          {"GET", _} -> market_ship_body(ship, 0)
-          {"POST", _} -> trade_response(agent, ship, "PURCHASE", 10, 950, 5)
-        end
-
-      Req.Test.json(conn, %{"data" => data})
-    end)
-
-    log =
-      ExUnit.CaptureLog.capture_log(fn ->
-        _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, selected.id)
-        assert Repo.get!(Intent, intent.id).status == "completed"
-
-        assert transaction_metrics() =~
-                 ~s(spacetraders_outcome_credits_transactions_total{intent_type="buy",operation="buy"} 50\n)
-      end)
-
-    assert log =~ "has failed and has been detached"
-  end
-
   def broken_transaction_handler(_event, _measurements, _metadata, _config),
     do: raise("broken transaction subscriber")
-
-  defp start_transaction_metrics do
-    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.Outcomes)
-    {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.Outcomes)
-    start_supervised!({SpaceTraders.TestClock, ~U[2030-01-01 00:00:00.000000Z]})
-    previous = Application.get_env(:spacetraders, :clock)
-    Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
-    handler = {__MODULE__, make_ref()}
-
-    :ok =
-      :telemetry.attach(
-        handler,
-        [:spacetraders, :outcome, :transaction],
-        &__MODULE__.handle_event/4,
-        self()
-      )
-
-    on_exit(fn ->
-      :telemetry.detach(handler)
-
-      if previous,
-        do: Application.put_env(:spacetraders, :clock, previous),
-        else: Application.delete_env(:spacetraders, :clock)
-
-      :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.Outcomes)
-      {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.Outcomes)
-    end)
-
-    start_supervised!(
-      PromEx.Storage.Peep.child_spec(
-        __MODULE__.OutcomeReporter,
-        SpaceTraders.PromEx.Outcome.event_metrics([]).metrics
-      )
-    )
-  end
-
-  defp transaction_metrics do
-    SpaceTraders.Outcomes.metrics(SpaceTraders.PromEx)
-    PromEx.Storage.Peep.scrape(__MODULE__.OutcomeReporter) |> IO.iodata_to_binary()
-  end
-
-  defp transaction_metric_value(series) do
-    line =
-      transaction_metrics()
-      |> String.split("\n")
-      |> Enum.find(&String.starts_with?(&1, series <> " "))
-
-    assert line, "missing series #{series}"
-    {value, ""} = line |> String.replace_prefix(series <> " ", "") |> Float.parse()
-    value
-  end
 
   for kind <- ["buy", "sell"] do
     @tag :market_recovery
@@ -1624,38 +1214,6 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
       assert %Intent{status: "completed", in_flight_action: nil} = Repo.get!(Intent, intent.id)
       refute MutationAttempts.get!(attempt.id).retry_authorized
-      assert length(MutationAttempts.list_for_agent(agent)) == 1
-    end
-
-    @tag :market_recovery
-    test "#{kind} stopped absence retires without needing Market eligibility or sending" do
-      {agent, ship, portfolio, commitment} = claimed_ship("MARKET-STOP-#{unquote(kind)}")
-      {intent, action} = market_selection(ship, portfolio, commitment, unquote(kind))
-
-      {:ok, %{intent: intent, attempt: attempt}} =
-        prepare_recorded(agent, intent, action)
-
-      {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
-      strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
-      Repo.update!(Ecto.Changeset.change(strategy, emergency_stopped_at: DateTime.utc_now()))
-
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        assert conn.method == "GET"
-        assert conn.request_path in ["/v2/my/agent", "/v2/my/ships/#{ship.symbol}"]
-
-        data =
-          if conn.request_path == "/v2/my/agent",
-            do: %{"symbol" => agent.symbol, "credits" => 1000},
-            else: market_ship_body(ship, action["cargo_before"])
-
-        Req.Test.json(conn, %{"data" => data})
-      end)
-
-      _ = Intents.reconcile(agent.id, ship.symbol, nil, :boot, intent.id)
-      assert Repo.get!(Intent, intent.id).in_flight_action == nil
-      absent = MutationAttempts.get!(attempt.id)
-      assert absent.state == "absent"
-      refute absent.retry_authorized
       assert length(MutationAttempts.list_for_agent(agent)) == 1
     end
 
@@ -2153,7 +1711,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
       assert restored == usable
     end
 
-    test "#{kind} Bounded Unknown retains exact composite proof and reconciles under Emergency Stop" do
+    test "#{kind} Bounded Unknown retains exact composite proof and reconciles" do
       {agent, ship, portfolio, commitment} = claimed_ship("BOUNDED-CREDIT-#{unquote(kind)}")
       intent = owned_intent(ship, portfolio, commitment, [])
 
@@ -2198,9 +1756,6 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
               []
             )
         )
-
-      strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
-      Repo.update!(Ecto.Changeset.change(strategy, emergency_stopped_at: DateTime.utc_now()))
 
       Req.Test.stub(SpaceTraders.API, fn conn ->
         assert conn.method == "GET"
@@ -3194,7 +2749,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     {agent, ship, portfolio, commitment} = claimed_ship("CHANGED-AUTHORITY")
     {intent, attempt} = selected_orbit(agent, ship, portfolio, commitment)
     strategy = Repo.get_by!(Strategy, operator_id: agent.operator_id)
-    Repo.update!(Ecto.Changeset.change(strategy, emergency_stopped_at: DateTime.utc_now()))
+    Repo.update!(Ecto.Changeset.change(strategy, active_revision_id: nil))
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       assert conn.method == "GET"
@@ -3443,7 +2998,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     :ok =
       :telemetry.attach(
         handler,
-        [:spacetraders, :repo, :query],
+        @repo_query_event,
         &__MODULE__.handle_event/4,
         self()
       )
@@ -3527,7 +3082,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     :ok =
       :telemetry.attach(
         handler,
-        [:spacetraders, :repo, :query],
+        @repo_query_event,
         &__MODULE__.handle_event/4,
         self()
       )
@@ -3783,7 +3338,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     {:messages, messages} = Process.info(self(), :messages)
 
     refute Enum.any?(messages, fn
-             {:telemetry, [:spacetraders, :repo, :query], _, %{query: query}} ->
+             {:telemetry, @repo_query_event, _, %{query: query}} ->
                String.contains?(query, ~s("jobs"))
 
              _ ->

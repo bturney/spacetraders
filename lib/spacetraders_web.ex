@@ -86,6 +86,7 @@ defmodule SpaceTradersWeb do
       import Phoenix.HTML
       # Core UI components
       import SpaceTradersWeb.CoreComponents
+      import SpaceTradersWeb.MissionControlComponents
 
       # Common modules used in templates
       alias Phoenix.LiveView.JS

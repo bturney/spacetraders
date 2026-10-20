@@ -508,7 +508,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
         "scope" => "recurring"
       }
 
-      fleet = investment_fleet(horizon_seconds: 3_600, leading_objectives: [chart])
+      fleet = investment_fleet(horizon_seconds: 600, leading_objectives: [chart])
 
       stub_game(fleet.agent, [@frigate],
         investment: true,
@@ -538,7 +538,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       test "#{scenario} refusal retains its evidence and never creates a Neutral Wait" do
         fleet =
           investment_fleet(
-            horizon_seconds: if(unquote(scenario) == :value, do: 3_600, else: 864_000)
+            horizon_seconds: if(unquote(scenario) == :value, do: 600, else: 864_000)
           )
 
         if unquote(scenario) == :horizon,
@@ -587,157 +587,48 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
   end
 
   describe "durable Ship-bound unmet work" do
-    test "fresh rejected trade uses comparable completed whole-work time and supporting charges" do
+    test "the selected trade and its rejected alternative carry their net credits per Ship-hour" do
       fleet = fleet([@frigate])
-      listing(fleet.agent, "X1-A3", 50, 40)
-      assert {:ok, %{action: :published}} = reconcile(fleet)
-      historical = completed_trade_sample(fleet, 1_800, 100)
 
-      listing(fleet.agent, "X1-A1", 10, 9)
-      listing(fleet.agent, "X1-A2", 30, 25)
+      retained_market_listing(fleet.agent, @system, "X1-A1", [
+        %{symbol: "IRON", purchase_price: 10, sell_price: 9, trade_volume: 60},
+        %{symbol: "FUEL", purchase_price: 100, sell_price: 90, trade_volume: 60}
+      ])
+
       listing(fleet.agent, "X1-A3", 50, 24)
       stub_game(fleet.agent, [@frigate], refuse_ship_reads: true)
       assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
 
+      # The speed-1 frigate at X1-A1: 6 units to X1-A3 burn 6 fuel (6 credits)
+      # and take 165 s, so 14 × 40 − 6 = 554 credits is 12,087 per Ship-hour.
       assert [work] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
-      assert work.source_waypoint == "X1-A1"
       assert work.destination_waypoint == "X1-A3"
-      assert work.trade_symbol == "IRON"
-      # Fresh spread is 14 * 40 = 560, less 100 supporting credits,
-      # occupying the Ship for 30 minutes including preparation and handoff.
-      assert work.planned_rate == 920.0
-      model = work.expected_outcomes["planned_rate_evidence"]
-      assert model["model"] == "market-observed-whole-work-v1"
-      assert model["conservative_occupied_seconds"] == 1_800
-      assert model["planned_supporting_cost"] == 100
-      assert historical.buy.id in model["purchase_intent_ids"]
-      assert historical.sale.id in model["sale_intent_ids"]
-      assert historical.support.id in model["supporting_attempt_ids"]
-      assert model["profiles"] != []
-    end
+      assert work.planned_rate == 12_087
 
-    test "missing whole-work timing keeps a comparable receipted trade rate unknown" do
-      fleet = fleet([@frigate])
-      listing(fleet.agent, "X1-A3", 50, 40)
-      assert {:ok, %{action: :published}} = reconcile(fleet)
-      historical = completed_trade_sample(fleet, 1_800, 100)
-      Repo.update!(Ecto.Changeset.change(historical.sale, finished_at: nil))
+      assert %{
+               "state" => "estimated",
+               "ship" => ship,
+               "net_credits" => 554,
+               "seconds" => 165,
+               "fuel_price" => 100
+             } = work.expected_outcomes["trade_estimate"]
 
-      listing(fleet.agent, "X1-A1", 10, 9)
-      listing(fleet.agent, "X1-A2", 30, 25)
-      listing(fleet.agent, "X1-A3", 50, 24)
-      stub_game(fleet.agent, [@frigate], refuse_ship_reads: true)
-      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      assert ship == ship_symbol(fleet, @frigate)
 
-      assert [work] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
-      assert work.planned_rate == nil
-      assert work.expected_outcomes["planned_rate_evidence"]["state"] == "unknown"
-    end
+      # X1-A2 won: 15 × 40 − 3 = 597 credits in 90 s, beating X1-A3.
+      selected = commitment_for(fleet, @frigate)
+      [episode] = selected_episodes(fleet)
 
-    test "a starting readiness snapshot without its retained observation cannot evidence a rate" do
-      fleet = fleet([@frigate])
-      listing(fleet.agent, "X1-A3", 50, 40)
-      assert {:ok, %{action: :published}} = reconcile(fleet)
-      historical = completed_trade_sample(fleet, 1_800, 100)
+      assert [chosen] = episode.expectations["selected_trades"]
+      assert chosen["candidate_id"] == selected.candidate_id
+      assert chosen["destination_waypoint"] == "X1-A2"
+      assert chosen["net_credits_per_ship_hour"] == 23_880
+      assert chosen["trade_estimate"]["seconds"] == 90
 
-      parameters =
-        put_in(historical.buy.parameters, ["work_start", "observation_id"], Ecto.UUID.generate())
-
-      Repo.update!(Ecto.Changeset.change(historical.buy, parameters: parameters))
-
-      listing(fleet.agent, "X1-A1", 10, 9)
-      listing(fleet.agent, "X1-A2", 30, 25)
-      listing(fleet.agent, "X1-A3", 50, 24)
-      stub_game(fleet.agent, [@frigate], refuse_ship_reads: true)
-      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
-
-      assert [work] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
-      assert work.planned_rate == nil
-    end
-
-    test "the longest comparable whole work and largest supporting charge bound the forecast" do
-      fleet = fleet([@frigate])
-      listing(fleet.agent, "X1-A3", 50, 40)
-      assert {:ok, %{action: :published}} = reconcile(fleet)
-      slow = completed_trade_sample(fleet, 1_800, 80)
-
-      listing(fleet.agent, "X1-A1", 10, 9)
-      listing(fleet.agent, "X1-A2", 30, 25)
-      listing(fleet.agent, "X1-A3", 50, 39)
-      assert {:ok, %{action: :published}} = reconcile(fleet)
-      expensive = completed_trade_sample(fleet, 600, 100)
-
-      listing(fleet.agent, "X1-A1", 10, 9)
-      listing(fleet.agent, "X1-A2", 30, 25)
-      listing(fleet.agent, "X1-A3", 50, 24)
-      stub_game(fleet.agent, [@frigate], refuse_ship_reads: true)
-      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
-
-      assert [work] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
-      assert work.planned_rate == 920.0
-      evidence = work.expected_outcomes["planned_rate_evidence"]
-
-      assert Enum.sort(evidence["purchase_intent_ids"]) ==
-               Enum.sort([slow.buy.id, expensive.buy.id])
-    end
-
-    for gap <- [:supporting_charge, :flight_mode, :capacity, :starting_waypoint, :route, :future] do
-      test "#{gap} evidence cannot authorize the rejected trade rate" do
-        fleet = fleet([@frigate])
-        listing(fleet.agent, "X1-A3", 50, 40)
-        assert {:ok, %{action: :published}} = reconcile(fleet)
-        historical = completed_trade_sample(fleet, 1_800, 100)
-
-        changes =
-          case unquote(gap) do
-            :supporting_charge ->
-              Repo.delete_all(
-                from r in SpaceTraders.CreditCalibration.Realization,
-                  where: r.mutation_attempt_id == ^historical.support.id
-              )
-
-              %{}
-
-            :flight_mode ->
-              %{"nav" => Map.put(nav_at("X1-A1"), "flightMode", "BURN")}
-
-            :capacity ->
-              %{"cargo" => %{"capacity" => 60, "units" => 0, "inventory" => []}}
-
-            :starting_waypoint ->
-              %{"nav" => nav_at("X1-A2")}
-
-            :route ->
-              result =
-                put_in(
-                  historical.sale.last_action_result,
-                  ["transaction", "waypoint_symbol"],
-                  "X1-A2"
-                )
-
-              Repo.update!(Ecto.Changeset.change(historical.sale, last_action_result: result))
-              %{}
-
-            :future ->
-              Repo.update!(
-                Ecto.Changeset.change(historical.sale,
-                  finished_at: DateTime.add(DateTime.utc_now(:second), 60)
-                )
-              )
-
-              %{}
-          end
-
-        listing(fleet.agent, "X1-A1", 10, 9)
-        listing(fleet.agent, "X1-A2", 30, 25)
-        listing(fleet.agent, "X1-A3", 50, 24)
-        stub_game(fleet.agent, [@frigate], refuse_ship_reads: true, ship_changes: changes)
-        assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
-
-        assert [work] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
-        assert work.planned_rate == nil
-        assert work.expected_outcomes["planned_rate_evidence"]["state"] == "unknown"
-      end
+      assert [beaten] = chosen["alternatives"]
+      assert beaten["candidate_id"] == work.candidate_id
+      assert beaten["net_credits_per_ship_hour"] == 12_087
+      assert beaten["trade_estimate"]["net_credits"] == 554
     end
 
     test "the last free Ship leaves a readable Claim-only trade alternative" do
@@ -751,8 +642,9 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert work.objective_index == 0
       assert work.objective["objective"] == "Grow credits"
       assert work.expected_outcomes["maximum_credit_change"] == 560
+      # No FUEL is sold, so the frigate's fuel cannot be priced.
       assert work.planned_rate == nil
-      assert work.expected_outcomes["planned_rate_evidence"]["state"] == "unknown"
+      assert work.expected_outcomes["trade_estimate"]["reason"] == "unknown_fuel_price"
       assert work.required_roles == [%{"role" => "market_trader", "count" => 1}]
 
       assert %{"capability" => "cargo_transport", "minimum_capacity" => 40} in work.required_capabilities
@@ -1565,7 +1457,7 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
                StructuralStall.observe(fleet.agent, fleet.revision, nil, decision)
     end
 
-    test "a structural stall raises one Degraded Attention that recovery resolves" do
+    test "a structural stall records one episode that recovery closes" do
       fleet = fleet([@frigate, @probe])
       overdue_market_demand(fleet)
       stalled = %{result: {:ok, %{action: :retained}}, counts: %{claimable_ships: 1}}
@@ -1577,16 +1469,11 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
       assert [%{id: episode_id}] = stall_episodes()
 
-      assert [%{kind: :attention, summary: summary} = attention] =
-               SpaceTraders.OperatorConditions.unresolved(fleet.scope)
-
-      assert summary =~ "Degraded Operation"
-      assert summary =~ "Overdue Market Observation Demands"
-      assert attention.strategy_decision_episode_id == episode_id
+      assert %{resolved_at: nil} = Repo.get!(StrategyDecisionEpisode, episode_id)
 
       explained = %{result: {:ok, %{action: :retained}}, counts: %{coverage_candidates: 1}}
       assert :healthy = StructuralStall.observe(fleet.agent, fleet.revision, nil, explained)
-      assert SpaceTraders.OperatorConditions.unresolved(fleet.scope) == []
+      assert %{resolved_at: %DateTime{}} = Repo.get!(StrategyDecisionEpisode, episode_id)
     end
 
     test "an errored decision or one without candidate counts explains nothing" do
@@ -2180,13 +2067,6 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
     bought = DateTime.add(started, 10, :second)
     finished = DateTime.add(now, -60, :second)
     fixtures = SpaceTraders.RealizedEconomicsFixtures
-
-    observation =
-      Repo.get!(SpaceTraders.Evidence.Observation, buy.parameters["work_start"]["observation_id"])
-
-    Repo.update!(
-      Ecto.Changeset.change(observation, observed_at: %{started | microsecond: {0, 6}})
-    )
 
     purchase = fixtures.refuel!(buy, 400, operation_id: "purchase-cargo")
     support = fixtures.refuel!(buy, support_cost)

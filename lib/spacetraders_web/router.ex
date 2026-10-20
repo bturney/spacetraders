@@ -51,8 +51,7 @@ defmodule SpaceTradersWeb.Router do
       live "/operators/settings/confirm-email/:token", OperatorLive.Settings, :confirm_email
       live "/agents/new", OperatorLive.Mint, :new
       live "/mission-control", MissionControlLive, :show
-      live "/operations", OperationsLive, :index
-      live "/activity", ActivityLive, :index
+      live "/stats", StatsLive, :show
       live "/generations", GenerationsLive, :index
       live "/decision-episodes/:id", DecisionEpisodeLive, :show
       live "/world", WorldLive, :index
@@ -62,8 +61,8 @@ defmodule SpaceTradersWeb.Router do
       live "/world/systems/:system/waypoints/:waypoint/shipyard", EntityLive, :shipyard
       live "/world/systems/:system/waypoints/:waypoint/construction", EntityLive, :construction
       live "/contracts/:contract_id", EntityLive, :contract
-      live "/ships/:ship_symbol", EntityLive, :ship
-      live "/intervention", InterventionLive, :index
+      live "/ships", ShipsLive, :index
+      live "/ships/:ship_symbol", ShipLive, :show
 
       live "/strategy", StrategyLive, :show
     end

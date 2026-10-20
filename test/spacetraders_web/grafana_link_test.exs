@@ -42,6 +42,44 @@ defmodule SpaceTradersWeb.GrafanaLinkTest do
     refute Map.has_key?(query, "token")
   end
 
+  test "carries a Ship symbol and a time window from a Ship screen" do
+    query =
+      :strategy_outcomes
+      |> GrafanaLink.url(
+        ship: "AGENT-7",
+        from: ~U[2030-01-01 12:00:00Z],
+        to: ~U[2030-01-01 18:00:00Z]
+      )
+      |> URI.parse()
+      |> Map.fetch!(:query)
+      |> URI.decode_query()
+
+    assert query == %{
+             "from" => "1893499200000",
+             "to" => "1893520800000",
+             "timezone" => "utc",
+             "var-ship" => "AGENT-7"
+           }
+  end
+
+  test "links to the player Money and Fleet dashboards" do
+    assert URI.parse(GrafanaLink.url(:money, from: "now-6h", to: :now)).path ==
+             "/d/spacetraders-money/money"
+
+    assert URI.parse(GrafanaLink.url(:fleet, [])).path == "/d/spacetraders-fleet/fleet"
+  end
+
+  test "omits a Ship scope that is nil" do
+    query =
+      :strategy_outcomes
+      |> GrafanaLink.url(ship: nil, from: "now-6h", to: :now)
+      |> URI.parse()
+      |> Map.fetch!(:query)
+      |> URI.decode_query()
+
+    assert query == %{"from" => "now-6h", "to" => "now", "timezone" => "utc"}
+  end
+
   test "routes calibration evidence to the family that answers its question" do
     assert GrafanaLink.family_for_calibration("market-v2") == :economics_capital
     assert GrafanaLink.family_for_calibration("ship-acquisition-v1") == :economics_capital

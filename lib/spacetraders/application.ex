@@ -7,6 +7,8 @@ defmodule SpaceTraders.Application do
 
   @impl true
   def start(_type, _args) do
+    SpaceTraders.Liveness.init()
+
     children =
       [
         SpaceTradersWeb.Telemetry,
@@ -21,7 +23,6 @@ defmodule SpaceTraders.Application do
         SpaceTraders.Evidence.ReadCoordinator,
         SpaceTraders.API.CapacityGovernor,
         SpaceTraders.API.ShadowAdmission,
-        SpaceTraders.EmergencyStopAdmission,
         SpaceTraders.FleetGenerationAdmission
       ] ++
         runtime_authority_children() ++

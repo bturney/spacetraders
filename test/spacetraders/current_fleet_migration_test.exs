@@ -74,6 +74,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
       |> List.update_at(8, fn rows ->
         Enum.map(rows, fn [row] -> [Map.put(row, "recovery_credential_ciphertext", nil)] end)
       end)
+      |> drop_retired_columns()
 
     assert retained() == expanded
 
@@ -274,6 +275,7 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
       |> List.update_at(8, fn rows ->
         Enum.map(rows, fn [row] -> [Map.put(row, "recovery_credential_ciphertext", nil)] end)
       end)
+      |> drop_retired_columns()
 
     historical_ships = query("SELECT agent_id, retired_at FROM ships").rows
     retired_at = DateTime.to_naive(now)
@@ -568,6 +570,29 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
       ).rows
 
     id
+  end
+
+  # Later migrations drop Emergency Stop columns (#759) and add nullable
+  # current Ship state (#765).
+  @ship_state_columns ~w(engine_speed engine_condition fuel_capacity cargo_capacity nav_status
+    waypoint_symbol fuel_current state_observed_at route_origin route_destination
+    route_departed_at route_arrives_at cooldown_expires_at)
+
+  defp drop_retired_columns(tables) do
+    List.update_at(tables, 2, fn rows ->
+      Enum.map(rows, fn [row] ->
+        [
+          Map.drop(row, [
+            "emergency_stopped_at",
+            "emergency_resume_prepared_at",
+            "emergency_stop_version"
+          ])
+        ]
+      end)
+    end)
+    |> List.update_at(5, fn rows ->
+      Enum.map(rows, fn [row] -> [Map.merge(row, Map.new(@ship_state_columns, &{&1, nil}))] end)
+    end)
   end
 
   defp retained do

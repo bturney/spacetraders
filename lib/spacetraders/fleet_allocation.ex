@@ -18,16 +18,16 @@ defmodule SpaceTraders.FleetAllocation do
     JsonEvidence,
     NeutralWait,
     Portfolio,
-    StrategyDecisionEpisode,
-    TradeProgress
+    StrategyDecisionEpisode
   }
 
   alias SpaceTraders.FleetGeneration
   alias SpaceTraders.FleetGeneration.Generation
+  alias SpaceTraders.Outcomes.Earnings
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy
   alias SpaceTraders.FleetStrategy.Strategy
-  alias SpaceTraders.{Clock, ManualIntervention, OperatorAuthority, Outbox, Repo, ShipReservation}
+  alias SpaceTraders.{Clock, OperatorAuthority, Outbox, Repo}
 
   alias SpaceTraders.FleetStrategy.{
     ObjectiveEvaluation,
@@ -97,9 +97,9 @@ defmodule SpaceTraders.FleetAllocation do
   (Strategic Priority), objective, source/destination Waypoints, Trade Good,
   requirements, expected outcomes and validity.
   Nested Candidate evidence retains the persisted string-keyed JSON shape.
-  `:planned_rate` is estimated net credits per Ship-hour, or nil when unknown.
-  `expected_outcomes["planned_rate_evidence"]` retains the versioned model,
-  profiles, inputs and original completed-Intent/charge evidence. This rate
+  `:planned_rate` is the trade's estimated net credits per Ship-hour for its
+  best owned Ship, or nil when unknown; `expected_outcomes["trade_estimate"]`
+  retains that `SpaceTraders.Fleet.TradeEstimate` and its FUEL price. This rate
   describes rejected existing-Ship work, not an offered Ship's valuation.
   `fuel_reach.ships` names eligible owned Ships only; offers must be evaluated
   independently against route, readiness and capacity.
@@ -692,29 +692,23 @@ defmodule SpaceTraders.FleetAllocation do
   end
 
   @doc """
-  Receipt-backed trade progress of one Decision Episode.
-
-  Derived from the Episode's completed buy/sell Intents on every call; amounts
-  the receipts do not prove are `"unknown"` and Net Earnings is never inferred.
-  """
-  defdelegate trade_progress(episode_id), to: TradeProgress, as: :for_episode
-
-  @doc """
-  Classifies a Portfolio's Decision Episode from its trade receipts after a
-  sale completes; it keeps evaluating while another Commitment still trades.
+  After a sale or jettison: writes the Earnings record of each of the
+  Portfolio's trades whose Cargo is all gone, then classifies its Decision
+  Episode from those records; it keeps evaluating while another Commitment
+  still trades.
   """
   def record_trade_outcome(%Portfolio{} = portfolio) do
-    record_market_outcome(
-      portfolio.strategy_decision_episode_id,
-      portfolio.operator_id,
-      realized_outcomes(portfolio.strategy_decision_episode_id)
-    )
+    Earnings.record_trades(portfolio)
+    record_market_outcome(portfolio.strategy_decision_episode_id, portfolio.operator_id)
   end
 
-  defp record_market_outcome(episode_id, operator_id, outcomes) do
-    case TradeProgress.classification(outcomes) do
-      :still_evaluating -> {:ok, :still_evaluating}
-      classification -> update_decision_outcome(episode_id, operator_id, classification, outcomes)
+  defp record_market_outcome(episode_id, operator_id) do
+    case realized_outcomes(episode_id) do
+      {:still_evaluating, _outcomes} ->
+        {:ok, :still_evaluating}
+
+      {classification, outcomes} ->
+        update_decision_outcome(episode_id, operator_id, classification, outcomes)
     end
   end
 
@@ -804,6 +798,8 @@ defmodule SpaceTraders.FleetAllocation do
 
   @doc "Records completed Market and resource outcomes left pending by a process restart."
   def reconcile_completed_outcomes do
+    record_pending_earnings()
+
     StrategyDecisionEpisode
     |> where([episode], episode.classification == :still_evaluating)
     |> join(:inner, [episode], portfolio in Portfolio,
@@ -834,7 +830,7 @@ defmodule SpaceTraders.FleetAllocation do
     |> distinct(true)
     |> Repo.all()
     |> Enum.each(fn episode ->
-      _ = record_market_outcome(episode.id, episode.operator_id, realized_outcomes(episode.id))
+      _ = record_market_outcome(episode.id, episode.operator_id)
     end)
 
     StrategyDecisionEpisode
@@ -1505,20 +1501,9 @@ defmodule SpaceTraders.FleetAllocation do
       )
 
     if active_generation? or active_revision? do
-      case current_ship_claim(agent, ship_symbol, opts) do
-        {:error, :no_current_ship_claim} = error ->
-          if ManualIntervention.authorized?(agent_id, ship_symbol, opts[:intent_id]) do
-            {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
-          else
-            error
-          end
-
-        claim ->
-          claim
-      end
+      current_ship_claim(agent, ship_symbol, opts)
     else
-      # Fleet Commitment and authenticated Manual Intervention remain the
-      # supported execution authorities.
+      # Fleet Commitment remains the supported execution authority.
       {:ok, %{commitment_id: nil, portfolio_id: nil, portfolio_version: nil}}
     end
   end
@@ -1711,11 +1696,7 @@ defmodule SpaceTraders.FleetAllocation do
     if not MapSet.disjoint?(settling_ships(generation_id), MapSet.new(claimed_symbols)),
       do: Repo.rollback(:ship_reserved)
 
-    if length(claimed_ships) != length(claimed_symbols) or
-         Repo.exists?(
-           from reservation in ShipReservation,
-             where: reservation.ship_id in ^claimed_ships and is_nil(reservation.released_at)
-         ) do
+    if length(claimed_ships) != length(claimed_symbols) do
       Repo.rollback(:ship_reserved)
     end
 
@@ -1842,7 +1823,7 @@ defmodule SpaceTraders.FleetAllocation do
         Repo.update!(
           Ecto.Changeset.change(episode,
             classification: :superseded,
-            actual_outcomes: json_safe(TradeProgress.for_episode(episode_id)),
+            actual_outcomes: json_safe(elem(Earnings.episode_outcome(episode_id), 1)),
             updated_at: now
           )
         )
@@ -1884,8 +1865,34 @@ defmodule SpaceTraders.FleetAllocation do
     Repo.get!(Generation, generation_id)
   end
 
+  # A sale or jettison may have committed just before a crash: write the
+  # record of every live Generation's trade whose Cargo is all gone. A
+  # retired or fenced Generation's trips were cut off and write nothing.
+  defp record_pending_earnings do
+    Repo.all(
+      from commitment in Commitment,
+        join: portfolio in Portfolio,
+        on: portfolio.id == commitment.fleet_commitment_portfolio_id,
+        join: generation in Generation,
+        on: generation.id == portfolio.fleet_generation_id,
+        join: intent in Intent,
+        on: intent.fleet_commitment_id == commitment.id,
+        left_join: record in SpaceTraders.Outcomes.EarningsRecord,
+        on: record.fleet_commitment_id == commitment.id,
+        where:
+          is_nil(record.id) and is_nil(generation.retired_at) and is_nil(generation.fenced_at) and
+            intent.status == "completed" and
+            (intent.type == "sell" or
+               (intent.type == "acquire_resources" and
+                  fragment("?->>'kind' = 'jettison'", intent.last_action_result))),
+        distinct: true,
+        select: commitment.id
+    )
+    |> Enum.each(&Earnings.record_trade/1)
+  end
+
   defp realized_outcomes(episode_id) do
-    result = TradeProgress.for_episode(episode_id)
+    {classification, result} = Earnings.episode_outcome(episode_id)
 
     resource_yields =
       Repo.all(
@@ -1903,7 +1910,11 @@ defmodule SpaceTraders.FleetAllocation do
         Map.take(evidence || %{}, ["kind", "yield", "cargo", "reconciled"])
       end)
 
-    if resource_yields == [], do: result, else: Map.put(result, :resource_yields, resource_yields)
+    {classification,
+     if(resource_yields == [],
+       do: result,
+       else: Map.put(result, :resource_yields, resource_yields)
+     )}
   end
 
   # One statement, so a leg that finishes or starts mid-check is still seen.
@@ -2072,8 +2083,12 @@ defmodule SpaceTraders.FleetAllocation do
 
     retained? = Enum.any?(Map.values(current), &same_commitment?(candidate, &1))
 
-    {candidate.objective_index, dependency_depth(candidate, candidates), -retained_value,
-     not retained?, candidate.id}
+    # Market trades with an estimate rank first, by estimated net credits per
+    # Ship-hour; everything else, a trade without one included, follows by value.
+    rate = Map.get(candidate, :net_credits_per_ship_hour)
+
+    {candidate.objective_index, dependency_depth(candidate, candidates), is_nil(rate),
+     -(rate || retained_value), not retained?, candidate.id}
   end
 
   defp dependency_depth(candidate, candidates, seen \\ MapSet.new()) do
@@ -2175,6 +2190,7 @@ defmodule SpaceTraders.FleetAllocation do
        dependencies: contribution.dependencies,
        validity: contribution.validity,
        expected_value: expected_value,
+       net_credits_per_ship_hour: net_credits_per_ship_hour(contribution),
        unwind_cost: 0,
        strategy_revision_id: contribution.strategy_revision_id,
        source: contribution
@@ -2193,10 +2209,34 @@ defmodule SpaceTraders.FleetAllocation do
 
   defp normalize_candidate(_candidate, _availability), do: :error
 
+  # A Market trade ranks by its estimated net credits per Ship-hour
+  # (`SpaceTraders.Fleet.TradeEstimate`); nil when it has no estimate.
+  defp net_credits_per_ship_hour(%CandidateContribution{kind: :market_trade} = contribution) do
+    case Map.get(contribution.expected_outcomes, :net_credits_per_ship_hour) do
+      rate when is_number(rate) -> rate
+      _ -> nil
+    end
+  end
+
+  defp net_credits_per_ship_hour(_contribution), do: nil
+
+  defp estimated_ship(%CandidateContribution{kind: :market_trade} = contribution) do
+    case Map.get(contribution.expected_outcomes, :trade_estimate) do
+      %{ship: ship} when is_binary(ship) -> ship
+      _ -> nil
+    end
+  end
+
+  defp estimated_ship(_contribution), do: nil
+
   defp eligible_claims(contribution, claims) do
+    estimated = estimated_ship(contribution)
+
+    # The Ship a trade's estimate was made for comes first, so the selected
+    # trade's expected net per Ship-hour describes the Ship that flies it.
     claims
     |> Enum.filter(&claim_supports?(&1, contribution))
-    |> Enum.sort_by(&{role_cost(&1, contribution), claim_id(&1)})
+    |> Enum.sort_by(&{claim_id(&1) != estimated, role_cost(&1, contribution), claim_id(&1)})
     |> Enum.map(&claim_id/1)
   end
 
@@ -2597,27 +2637,6 @@ defmodule SpaceTraders.FleetAllocation do
       nil -> {:error, :strategy_not_active}
     end
   end
-
-  @doc "Selects a fresh post-stop plan and only then restores mutation admission."
-  def complete_emergency_stop_resume(%Scope{} = scope, plans, expected_emergency_stop_version) do
-    with %{emergency_resume_prepared_at: %DateTime{} = prepared_at} <- FleetStrategy.get(scope),
-         {:ok, %{admissible: [selected | _]} = ranking} <- rank_plans(scope, plans),
-         true <- fresh_plan?(selected, prepared_at),
-         {:ok, projection} <-
-           FleetStrategy.complete_emergency_stop_resume(scope, expected_emergency_stop_version) do
-      {:ok, %{ranking: ranking, strategy: projection}}
-    else
-      {:ok, %{admissible: []}} -> {:error, :fresh_plan_required}
-      false -> {:error, :fresh_plan_required}
-      %{emergency_resume_prepared_at: nil} -> {:error, :resume_not_prepared}
-      error -> error
-    end
-  end
-
-  defp fresh_plan?(%{safety: %{observed_at: %DateTime{} = observed_at}}, prepared_at),
-    do: DateTime.compare(observed_at, prepared_at) in [:eq, :gt]
-
-  defp fresh_plan?(_plan, _prepared_at), do: false
 
   defp rank(%Revision{document: %{"objectives" => objectives}} = revision, plans)
        when is_list(objectives) and is_list(plans) do

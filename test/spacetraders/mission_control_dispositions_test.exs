@@ -2,7 +2,7 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
   @moduledoc """
   Mission Control projects the Agent's actual Market allocation disposition
   from durable facts, without minting status or mutating the game (#688).
-  Seam: `MissionControl.market_execution/1` `:dispositions`.
+  Seam: `MissionControl.MarketDisposition.for_agent/3`.
   """
   use SpaceTraders.DataCase, async: false
 
@@ -17,7 +17,7 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
-  alias SpaceTraders.MissionControl
+  alias SpaceTraders.MissionControl.MarketDisposition
 
   setup tags do
     fleet(Map.get(tags, :reservations, [0]))
@@ -51,16 +51,6 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     assert disposition.operator_action == :none
     assert disposition.active_revision.number == 1
     assert [_] = disposition.portfolio.commitment_ids
-    assert_no_operator_attention(ctx)
-  end
-
-  # Healthy work, Neutral Wait and Capacity Deferral read through the deployment
-  # authority as no Attention. Authorization is asserted first, so an empty
-  # answer cannot come from a refused (non-deployment) scope.
-  defp assert_no_operator_attention(ctx) do
-    assert {:ok, _operator_id} = SpaceTraders.OperatorAuthority.authorize(ctx.scope)
-    assert MissionControl.market_execution(ctx.scope).attention == []
-    assert SpaceTraders.OperatorConditions.unresolved(ctx.scope) == []
   end
 
   test "retained current-Revision coverage is its own healthy state", ctx do
@@ -91,9 +81,8 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     assert stall.release =~ "Revision #{newer.number}"
     assert disposition.active_revision.number == 2
 
-    # Reading mints nothing: no Episode, condition or status row.
+    # Reading mints nothing: no Episode or status row.
     assert Repo.aggregate(Episode, :count) == before
-    assert SpaceTraders.OperatorConditions.unresolved(ctx.scope) == []
   end
 
   test "a recorded authority-blocked stall shows its Episode and clears once resolved", ctx do
@@ -149,7 +138,6 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     assert pause.floor == 1_000
     assert pause.kind == "revision_floor"
     assert pause.release =~ "at or above the 1000 credit floor"
-    assert MissionControl.market_execution(ctx.scope).attention == []
   end
 
   test "a released Shortfall no longer appears as an active pause", ctx do
@@ -190,7 +178,6 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     assert wait.coverage == nil
     assert wait.next_observation_at == next
     assert wait.decision_episode_id == episode.id
-    assert_no_operator_attention(ctx)
   end
 
   test "an incomplete-coverage Neutral Wait reports coverage and its last evaluation", ctx do
@@ -248,7 +235,6 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
              dispositions(ctx)
 
     assert %DateTime{} = deferral.retry_at
-    assert_no_operator_attention(ctx)
   end
 
   test "a trading Ship stays busy while get-market is throttled", ctx do
@@ -279,7 +265,16 @@ defmodule SpaceTraders.MissionControlDispositionsTest do
     assert [%{unallocated_ships: ["IDLE-1"]}] = dispositions(ctx)
   end
 
-  defp dispositions(ctx), do: MissionControl.market_execution(ctx.scope).dispositions
+  defp dispositions(ctx) do
+    case SpaceTraders.FleetStrategy.get(ctx.scope).active_revision do
+      nil ->
+        []
+
+      active ->
+        portfolio = SpaceTraders.FleetAllocation.current_portfolio(ctx.scope, ctx.agent)
+        List.wrap(MarketDisposition.for_agent(ctx.agent, active, portfolio))
+    end
+  end
 
   defp overdue_demands(ctx, count) do
     for n <- 1..count do

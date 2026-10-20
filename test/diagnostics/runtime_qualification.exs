@@ -55,7 +55,6 @@ defmodule SpaceTraders.RuntimeQualification do
     on_exit(fn ->
       SpaceTraders.Quiesced.stop_all_ships()
       SpaceTraders.Contracts.DeadlineServer.stop_all()
-      SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
       Sandbox.mode(Repo, :manual)
 
@@ -145,7 +144,7 @@ defmodule SpaceTraders.RuntimeQualification do
     stub_api(fn conn -> Game.reply(conn, Game.call(game, conn)) end)
     allow_game_runtime()
     start_runtime()
-    {conn, agent} = activate_fresh_generation(conn)
+    {conn, _agent} = activate_fresh_generation(conn)
 
     assert_eventually(fn -> Game.snapshot(game).status == "IN_TRANSIT" end, 500)
     settle_runtime()
@@ -196,9 +195,8 @@ defmodule SpaceTraders.RuntimeQualification do
       limit: :infinity
     )
 
-    {:ok, view, html} = live(conn, ~p"/mission-control")
-    IO.puts("Operator-visible operating health: " <> render(element(view, "#operating-health")))
-    assert html =~ agent.symbol
+    {:ok, view, _html} = live(conn, ~p"/mission-control")
+    IO.puts("Operator-visible Plan Health: " <> render(element(view, "#plan-health")))
     assert Map.get(counts, "/v2/my/ships/BASELINE-1/purchase", 0) == 1
     assert Map.get(counts, "/v2/my/ships/BASELINE-1/sell", 0) == 1
     assert state.credits == 175_800
@@ -289,16 +287,9 @@ defmodule SpaceTraders.RuntimeQualification do
       widened = SpaceTraders.CreditCalibration.active()
       assert widened.margin_percent > initial.margin_percent
       assert widened.basis == "pricing_model_miss"
-
-      assert Repo.exists?(
-               from c in SpaceTraders.OperatorConditions.Condition,
-                 where:
-                   c.operator_id == ^agent.operator_id and
-                     c.key == ^"credit-pricing-breach:#{agent.id}" and c.kind == :attention
-             )
     end
 
-    test "API Retry-After defers Market reads without Attention and the trade completes",
+    test "API Retry-After defers Market reads and the trade completes",
          %{conn: conn} do
       game = start_game(throttled_market_reads: 3)
       {_conn, agent} = activate_fresh_generation(conn)
@@ -310,12 +301,7 @@ defmodule SpaceTraders.RuntimeQualification do
       assert length(requests(state, "/v2/my/ships/BASELINE-1/sell")) == 1, trace(state)
       assert state.credits == 175_800
 
-      refute Repo.exists?(
-               from c in SpaceTraders.OperatorConditions.Condition,
-                 where: c.operator_id == ^agent.operator_id and c.kind == :attention
-             )
-
-      # Capacity Deferral never becomes Attention or objective infeasibility.
+      # Capacity Deferral never becomes objective infeasibility.
       # (A later trade may be infeasible for fuel; that is not capacity.)
       outcomes =
         Repo.all(
@@ -344,8 +330,8 @@ defmodule SpaceTraders.RuntimeQualification do
 
     # A pricing-model breach on the purchase leaves credits below the floor.
     # The trade then needs fuel the Ship cannot buy: no recovery-spend
-    # exception, so the Ship's work blocks for the Operator instead.
-    test "below-floor fuel stranding raises Attention instead of refuelling", %{conn: conn} do
+    # exception, so the Ship's work blocks instead.
+    test "below-floor fuel stranding blocks instead of refuelling", %{conn: conn} do
       # 500 credits of headroom funds the 40-unit hold at the 25% margin; the
       # game charges 15 per unit (600), leaving 49,900 below the floor. 130
       # fuel covers surveying the distant Market and returning (60 + 60), not
@@ -376,7 +362,7 @@ defmodule SpaceTraders.RuntimeQualification do
         )
 
       assert Enum.any?(blocked, &(&1 && &1.reason == "credit_spending_paused")),
-             "no stranding Attention: blocked=#{inspect(blocked)} #{inspect(paths(state))}"
+             "no stranding block: blocked=#{inspect(blocked)} #{inspect(paths(state))}"
 
       {:ok, _view, html} = live(conn, ~p"/mission-control")
       assert html =~ "Spending stays paused"
@@ -458,16 +444,14 @@ defmodule SpaceTraders.RuntimeQualification do
       assert DateTime.compare(observed_at, refuel.at) != :gt
       open_gaps = interpretation.coverage_gaps
 
-      # Realized economics are receipt-backed: the trade margin is proven from
-      # the buy and sell transaction receipts; Net Earnings deducts the refuel
-      # charge realized by the trade's own root Intent (#689), referenced by
-      # its exact succeeded attempt.
-      progress = FleetAllocation.trade_progress(first_trade_episode_id())
-      assert progress.completed_round_trips == 1
-      assert {progress.units_bought, progress.units_sold} == {40, 40}
-      assert {progress.credits_spent, progress.credits_received} == {400, 1200}
-      assert progress.trade_margin == 1200 - 400
-      assert_attributed_net_earnings(agent, progress, fuel_cost)
+      # The Completed Round Trip wrote one Earnings record (#766); its Net
+      # Earnings deducts the refuel charge realized by the trade's own root
+      # Intent (#689).
+      assert [record] = first_trade_records()
+      assert {record.units, record.revenue, record.goods_cost} == {40, 1200, 400}
+      assert record.fuel_cost == fuel_cost
+      assert record.ship_symbol == "BASELINE-1"
+      assert record.net_earnings == 1200 - 400 - fuel_cost
 
       # Every send is one recorded Mutation Attempt with a confirmed outcome:
       # one purchase, one refuel and one sale reached transport, none unknown.
@@ -571,9 +555,8 @@ defmodule SpaceTraders.RuntimeQualification do
       assert "BASELINE-2" in ship_symbols_of("acquire_intelligence")
       assert Enum.any?(before_sale, &market_read?(&1, "A3"))
 
-      progress = FleetAllocation.trade_progress(first_trade_episode_id())
-      assert {progress.credits_spent, progress.credits_received} == {40 * 14, 40 * 30}
-      assert progress.trade_margin == 40 * (30 - 14)
+      assert [record] = first_trade_records()
+      assert {record.goods_cost, record.revenue} == {40 * 14, 40 * 30}
       assert sale.transaction["totalPrice"] == 1200
     end
 
@@ -596,7 +579,7 @@ defmodule SpaceTraders.RuntimeQualification do
       refute Repo.exists?(from i in SpaceTraders.Fleet.Intent, where: i.status == "blocked")
     end
 
-    test "API Retry-After defers Market reads without Attention or a Neutral Wait and the trade completes",
+    test "API Retry-After defers Market reads without a Neutral Wait and the trade completes",
          %{conn: conn} do
       game = start_fleet_game(throttled_market_reads: 3)
       {_conn, agent} = activate_fresh_generation(conn)
@@ -606,13 +589,8 @@ defmodule SpaceTraders.RuntimeQualification do
       assert fleet_sold?(state), fleet_trace(state)
       assert Enum.count(state.requests, &(&1.reply == :throttled)) == 3
 
-      # Capacity Deferral is advisory timing, never an Operator condition, a
-      # false infeasibility or a wait minted by the Fleet.
-      refute Repo.exists?(
-               from c in SpaceTraders.OperatorConditions.Condition,
-                 where: c.operator_id == ^agent.operator_id and c.kind == :attention
-             )
-
+      # Capacity Deferral is advisory timing, never a false infeasibility or a
+      # wait minted by the Fleet.
       refute Repo.exists?(
                from e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
                  where: e.selection_kind == :neutral_wait
@@ -902,16 +880,13 @@ defmodule SpaceTraders.RuntimeQualification do
       # the root Intent that issued it, across both Revisions' Episodes; the
       # trade deducts only its own, and positive Net Earnings follows.
       assert_each_refuel_attributed_once(agent, state)
-      progress = FleetAllocation.trade_progress(first_trade_episode_id())
-      own = Enum.reject(progress.supporting_charges, & &1.observation_only)
+      assert [record] = first_trade_records()
 
-      assert progress.trade_margin ==
+      assert record.revenue - record.goods_cost ==
                sale.transaction["totalPrice"] - purchase.transaction["totalPrice"]
 
-      assert progress.net_earnings ==
-               progress.trade_margin - Enum.sum_by(own, & &1.realized_charge)
-
-      assert progress.net_earnings > 0, inspect(progress)
+      assert record.net_earnings == record.revenue - record.goods_cost - record.fuel_cost
+      assert record.net_earnings > 0, inspect(record)
 
       # Reconciliation is busy work, not a structural stall, and no rejected
       # publication is recorded per reconciliation tick.
@@ -1265,35 +1240,19 @@ defmodule SpaceTraders.RuntimeQualification do
     )
   end
 
-  # #689: one refuel, realized on the game's FUEL receipt, issued by a trade
-  # root Intent (buy or sell) of the round trip's own Commitment and deducted
-  # once from its Trade Margin; nothing on coverage Episodes moves into it.
-  defp assert_attributed_net_earnings(agent, progress, fuel_cost) do
-    [%{commitment_id: commitment_id, trade_margin: margin} = trip] = progress.round_trips
-
-    assert [%{mutation_attempt_id: attempt_id} = charge] =
-             Enum.reject(progress.supporting_charges, & &1.observation_only)
-
-    assert %{
-             operation_id: "refuel-ship",
-             commitment_id: ^commitment_id,
-             realized_charge: ^fuel_cost,
-             intent_type: type,
-             ship_symbol: "BASELINE-1"
-           } = charge
-
-    assert type in ~w(buy sell)
-    assert %Attempt{state: "succeeded", agent_id: agent_id} = Repo.get!(Attempt, attempt_id)
-    assert agent_id == agent.id
-    assert trip.supporting_attempt_ids == [attempt_id]
-    assert trip.supporting_cost == fuel_cost
-    assert progress.net_earnings == margin - fuel_cost
-    assert progress.net_earnings > 0
-  end
+  defp first_trade_records,
+    do: SpaceTraders.Outcomes.Earnings.for_episode(first_trade_episode_id())
 
   defp assert_each_refuel_attributed_once(agent, state) do
-    generation = FleetAllocation.active_generation(agent)
-    attributed = FleetAllocation.TradeProgress.for_generation(generation.id).supporting_charges
+    attributed =
+      Repo.all(
+        from r in SpaceTraders.CreditCalibration.Realization,
+          where: r.agent_id == ^agent.id and r.operation_id == "refuel-ship",
+          select: %{
+            mutation_attempt_id: r.mutation_attempt_id,
+            realized_charge: r.realized_charge
+          }
+      )
 
     charged =
       for %{method: "POST", path: path, transaction: %{"totalPrice" => price}} <- state.requests,

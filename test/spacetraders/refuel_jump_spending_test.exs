@@ -3,8 +3,8 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
   Refuel and jump/antimatter spending through the production root Intent
   lifecycle (`Intents.execute_action/4`) and the shared recorded-action
   admission: explicit bounded quantity, quote before preparation, Fleet-wide
-  Reservations, durable Bounded Unknown exposure, and Attention (a blocked
-  Intent) instead of any spend below the credit floor.
+  Reservations, durable Bounded Unknown exposure, and a blocked
+  Intent instead of any spend below the credit floor.
   """
   use SpaceTraders.DataCase, async: false
 
@@ -18,7 +18,7 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
   alias SpaceTraders.Fleet.{Intent, Intents}
   alias SpaceTraders.Fleet.Intents.RecordedAction
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.{PortfolioCandidate, TradeProgress}
+  alias SpaceTraders.FleetAllocation.PortfolioCandidate
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.MutationAttempts
@@ -78,7 +78,7 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
         else: assert(body == %{"waypointSymbol" => "X1-UX81-A2"})
     end
 
-    test "#{kind} below the floor never spends and raises Attention", %{posts: posts} do
+    test "#{kind} below the floor never spends and blocks the Intent", %{posts: posts} do
       {agent, [intent | _]} = claimed([0])
       stub_game(agent, posts, @good, 900)
 
@@ -223,11 +223,6 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
     assert {:ok, %{state: "accepted"}} = MutationAttempts.reconcile(attempt, :accepted, proof)
 
     assert %{realized_charge: 75} = CreditCalibration.realization(attempt)
-
-    assert %{supporting_charges: [%{realized_charge: 75, mutation_attempt_id: id}]} =
-             TradeProgress.for_portfolio(intent.fleet_commitment_portfolio_id)
-
-    assert id == attempt.id
   end
 
   test "a refuel whose response never arrived stays an unknown charge after reconciliation",
@@ -257,10 +252,8 @@ defmodule SpaceTraders.RefuelJumpSpendingTest do
 
     assert {:ok, _} = MutationAttempts.reconcile(attempt, :accepted, proof)
 
+    # No Realization: an Earnings record leaves this charge out, never zero-proves it.
     assert CreditCalibration.realization(attempt) == nil
-
-    assert %{supporting_charges: [%{realized_charge: "unknown"}], net_earnings: "unknown"} =
-             TradeProgress.for_portfolio(intent.fleet_commitment_portfolio_id)
   end
 
   test "a refuel without explicit units is not preparable" do

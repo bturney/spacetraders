@@ -160,10 +160,20 @@ defmodule SpaceTraders.API do
     )
   end
 
-  @doc "GET /my/ships"
+  @doc "GET /my/ships across every page; a failed page fails the whole read."
   @spec get_ships(token(), keyword()) :: result()
   def get_ships(token, opts \\ []) when is_list(opts) do
-    request(:get, "/my/ships", token, Keyword.merge(opts, as: {:list, Ship}))
+    case Pagination.ships(fn params ->
+           request(
+             :get,
+             "/my/ships",
+             token,
+             Keyword.merge(opts, params: params, as: {:list, Ship})
+           )
+         end) do
+      {:ok, ships} -> {:ok, ships}
+      {:error, reason, _collected} -> {:error, reason}
+    end
   end
 
   @doc "GET /my/ships/{symbol}"
@@ -494,6 +504,8 @@ defmodule SpaceTraders.API do
             # write landed; an unresolved attempt later reconciled accepted keeps
             # its realized charge.
             record_realized_charge(decoded, attempt)
+            # Every Ship-bearing response keeps stored Ship state current.
+            SpaceTraders.Fleet.record_ship_response(opts[:agent_id], path, decoded)
 
             case outcome do
               :ok ->
@@ -802,9 +814,8 @@ defmodule SpaceTraders.API do
   defp mutation_authorized?(:get, _token), do: :ok
 
   defp mutation_authorized?(_method, token) do
-    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?(),
-         :ok <- SpaceTraders.FleetGenerationAdmission.mutation_allowed?(token) do
-      SpaceTraders.EmergencyStopAdmission.mutation_allowed?(token)
+    with :ok <- SpaceTraders.RuntimeAuthority.execution_allowed?() do
+      SpaceTraders.FleetGenerationAdmission.mutation_allowed?(token)
     end
   end
 
@@ -817,6 +828,7 @@ defmodule SpaceTraders.API do
   defp mutation_authorized_after_response(_status, _method, _token), do: :ok
 
   defp emit_request_metric(operation, path, status) do
+    SpaceTraders.Liveness.game_request(status)
     SpaceTraders.Observability.api_request(operation, path, status)
   end
 

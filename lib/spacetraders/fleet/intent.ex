@@ -2,7 +2,7 @@ defmodule SpaceTraders.Fleet.Intent do
   @moduledoc """
   A durable cargo-operation Intent for one Ship.
 
-  Fleet Commitment and Manual Intervention callers use a reusable outcome-level
+  Fleet Commitment callers use a reusable outcome-level
   Intent, not a durable Ship mode. The active intent chain, meaningful progress,
   and in-flight request/response evidence persist across restarts so recovery
   can reconcile game truth before another mutation instead of blindly replaying
@@ -17,8 +17,8 @@ defmodule SpaceTraders.Fleet.Intent do
   @types ~w(navigate acquire_intelligence acquire_resources buy sell deliver transfer install_module remove_module)
 
   schema "intents" do
-    # Fleet Commitment and authenticated intervention Intents are scoped by the
-    # Fleet Commitment authorization layer before execution.
+    # Fleet Commitment Intents are scoped by the Fleet Commitment authorization
+    # layer before execution.
     field :caller, :string
     field :type, :string, default: "navigate"
     field :target_waypoint, :string
@@ -31,6 +31,15 @@ defmodule SpaceTraders.Fleet.Intent do
     belongs_to :mutation_attempt, SpaceTraders.MutationAttempts.Attempt, type: :binary_id
     field :last_action_result, :map
     field :recovery_attempts, :integer, default: 0
+    # A blocked step's next automatic retry, and how often it was retried
+    # while blocked. Both clear when the step leaves `blocked`.
+    field :next_attempt_at, :utc_datetime
+    field :retries, :integer, default: 0
+    # When the step last became blocked, and when it last left `blocked` to
+    # carry on (not to end as infeasible, stopped or superseded).
+    field :blocked_at, :utc_datetime
+    field :blocked_reason, :string
+    field :recovered_at, :utc_datetime
     field :finished_at, :utc_datetime
     field :fleet_commitment_portfolio_version, :integer
 
@@ -64,7 +73,7 @@ defmodule SpaceTraders.Fleet.Intent do
     ])
     |> cast_embed(:blocker)
     |> validate_required([:caller, :type, :target_waypoint])
-    |> validate_inclusion(:caller, ["commitment", "intervention"])
+    |> validate_inclusion(:caller, ["commitment"])
     |> validate_commitment_owner()
     |> validate_inclusion(:type, @types)
     |> validate_inclusion(:status, @unfinished_states ++ @terminal_states)

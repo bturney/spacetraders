@@ -8,8 +8,8 @@ defmodule SpaceTraders.CreditCalibration do
   that retains the evidence and attempt that justified it.
 
   Only a realized charge attributable to one attempt and above that attempt's
-  recorded bound is a pricing-model miss: it widens the margin and raises
-  Degraded Attention. Every unreleased shortfall, of any kind, pauses new
+  recorded bound is a pricing-model miss: it widens the margin.
+  Every unreleased shortfall, of any kind, pauses new
   credit-bearing admission for its Agent until a newer authoritative balance
   at or above the active floor releases it. Nothing here sells Cargo or grants
   a recovery-spend exception.
@@ -17,8 +17,8 @@ defmodule SpaceTraders.CreditCalibration do
 
   import Ecto.Query
 
-  alias SpaceTraders.Agent.{Agent, Operator, Scope}
-  alias SpaceTraders.{Clock, CreditSpending, OperatorConditions, Repo}
+  alias SpaceTraders.Agent.Agent
+  alias SpaceTraders.{Clock, CreditSpending, Repo}
   alias SpaceTraders.CreditCalibration.{Realization, Shortfall, Version}
   alias SpaceTraders.FleetStrategy.{Revision, StandingAuthority}
   alias SpaceTraders.MutationAttempts.Attempt
@@ -91,10 +91,6 @@ defmodule SpaceTraders.CreditCalibration do
           else: realize(attempt, spending, facts)
       end)
       |> case do
-        {:ok, %Shortfall{kind: "pricing_model_miss"} = shortfall} ->
-          raise_degraded_attention(attempt, shortfall)
-          {:ok, shortfall}
-
         {:ok, result} ->
           {:ok, result}
 
@@ -127,7 +123,7 @@ defmodule SpaceTraders.CreditCalibration do
 
     cond do
       open != [] and recovered?(open, balance, floor) ->
-        release(agent, open, credits)
+        release(open, credits)
 
       open != [] ->
         {:error, :credit_spending_paused}
@@ -381,7 +377,7 @@ defmodule SpaceTraders.CreditCalibration do
       Enum.all?(open, &(DateTime.compare(balance.observed_at, &1.detected_at) == :gt))
   end
 
-  defp release(agent, open, credits) do
+  defp release(open, credits) do
     now = Clock.utc_now()
     ids = Enum.map(open, & &1.id)
 
@@ -396,41 +392,8 @@ defmodule SpaceTraders.CreditCalibration do
       ]
     )
 
-    if Enum.any?(open, &(&1.kind == "pricing_model_miss")) do
-      OperatorConditions.resolve(scope(agent.operator_id), attention_key(agent.id),
-        notify?: false
-      )
-    end
-
     :ok
   end
-
-  defp raise_degraded_attention(attempt, shortfall) do
-    agent = Repo.get!(Agent, attempt.agent_id)
-    widened = Repo.get!(Version, shortfall.widened_calibration_version_id)
-
-    OperatorConditions.raise(
-      scope(agent.operator_id),
-      attention_key(agent.id),
-      :attention,
-      "Degraded Operation: a #{operation_label(attempt.operation_id)} charged " <>
-        "#{shortfall.realized_charge} credits, above its calibrated worst-case bound of " <>
-        "#{shortfall.worst_case_exposure}. The pricing-model breach is recorded and the " <>
-        "margin widened to #{widened.margin_percent}%. New credit-bearing spending stays " <>
-        "paused until an authoritative balance at or above the " <>
-        "#{shortfall.credit_floor} credit floor is observed; other work continues.",
-      fleet_strategy_revision_id: shortfall.strategy_revision_id
-    )
-  end
-
-  defp operation_label("purchase-cargo"), do: "Market purchase"
-  defp operation_label("refuel-ship"), do: "refuel"
-  defp operation_label("purchase-ship"), do: "Ship purchase"
-  defp operation_label(operation_id), do: operation_id
-
-  defp attention_key(agent_id), do: "credit-pricing-breach:#{agent_id}"
-
-  defp scope(operator_id), do: Scope.for_operator(Repo.get!(Operator, operator_id))
 
   defp attempt_floor(%Attempt{strategy_revision_id: nil}), do: 0
 

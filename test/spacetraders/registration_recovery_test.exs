@@ -10,7 +10,7 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
   import SpaceTraders.AgentFixtures
   import Ecto.Query
   alias Ecto.Adapters.SQL.Sandbox
-  alias SpaceTraders.{Agent, FleetGeneration, OperatorConditions, Repo, RuntimeDeath}
+  alias SpaceTraders.{Agent, FleetGeneration, Repo, RuntimeDeath}
   alias SpaceTraders.MutationAttempts.{Attempt, Outcome}
 
   setup do
@@ -43,7 +43,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       topics = ["fleet_allocation:#{operator.id}" | Enum.map(agent_ids, &"fleet:#{&1}")]
       Repo.delete_all(from(n in SpaceTraders.Outbox.Notification, where: n.topic in ^topics))
       SpaceTraders.AgentFixtures.cleanup_operator_fixture(operator.id)
-      SpaceTraders.EmergencyStopAdmission.clear()
       SpaceTraders.FleetGenerationAdmission.clear()
       restart_capacity_governor()
       Sandbox.mode(Repo, :manual)
@@ -195,9 +194,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert summary =~ "ORBITALIST"
       assert {:ok, %{state: :empty}} = FleetGeneration.current_fleet(scope)
 
-      assert [%{key: "registration-recovery", kind: :intervention}] =
-               OperatorConditions.unresolved(scope)
-
       # A restarted or competing setup sees the committed uncertainty.
       assert {:error, :registration_unresolved} =
                in_session(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
@@ -246,7 +242,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert_received {:game_request, "GET", "/v2/agents/ORBITALIST", nil}
       refute_received {:game_request, "POST", _, _}
       assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
-      assert OperatorConditions.unresolved(scope) == []
 
       assert {:ok, %{agent: agent}} =
                in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
@@ -303,7 +298,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
                FleetGeneration.current_fleet(scope)
 
       assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
-      assert OperatorConditions.unresolved(scope) == []
       assert ["ORBITALIST-1"] = ship_symbols(adopted)
 
       # Once current, the recovery path cannot add another Agent.
@@ -352,53 +346,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
           do: Application.put_env(:spacetraders, SpaceTraders.RuntimeAuthority, previous),
           else: Application.delete_env(:spacetraders, SpaceTraders.RuntimeAuthority)
       end
-    end
-
-    test "Emergency Stop permits identity reconciliation but suppresses minting and the adopted token's mutations",
-         %{scope: scope} do
-      assert {:error, :registration_unresolved} =
-               in_session(fn -> FleetGeneration.mint(scope, mint("ORBITALIST")) end)
-
-      assert_received {:game_request, "POST", "/v2/register", "ORBITALIST"}
-      assert {:ok, stopped} = SpaceTraders.FleetStrategy.engage_emergency_stop(scope)
-
-      assert {:error, :emergency_stopped} =
-               in_session(fn -> FleetGeneration.mint(scope, mint("PARALLAX")) end)
-
-      refute_received {:game_request, _, _, _}
-
-      game(fn conn ->
-        case conn.request_path do
-          "/v2/my/agent" ->
-            Req.Test.json(conn, my_agent("ORBITALIST"))
-
-          "/v2/my/ships" ->
-            Req.Test.json(conn, %{
-              "data" => [ship("ORBITALIST-1")],
-              "meta" => %{"total" => 1, "page" => 1, "limit" => 20}
-            })
-        end
-      end)
-
-      assert {:ok, %{agent: adopted}} =
-               in_session(fn ->
-                 FleetGeneration.adopt_registered_agent(scope, "RECOVERED_SECRET", true)
-               end)
-
-      assert adopted.symbol == "ORBITALIST"
-
-      assert SpaceTraders.FleetStrategy.get(scope).emergency_stopped_at ==
-               stopped.emergency_stopped_at
-
-      assert {:error, :emergency_stopped} =
-               in_session(fn ->
-                 SpaceTraders.API.accept_contract(
-                   SpaceTraders.API.AgentTokenReference.new(adopted),
-                   "c1"
-                 )
-               end)
-
-      refute_received {:game_request, "POST", _, _}
     end
   end
 
@@ -602,9 +549,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       assert %{status: :unresolved, attempt_id: ^attempt_id, symbol: "ORBITALIST"} =
                FleetGeneration.registration_recovery(scope)
 
-      assert %{status: :unresolved, attempt_id: ^attempt_id} =
-               SpaceTraders.MissionControl.overview(scope).registration_recovery
-
       assert {:error, :registration_unresolved} =
                in_session(fn -> FleetGeneration.import_agent(scope, "OTHER_SECRET", true) end)
 
@@ -628,9 +572,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
 
       assert %{status: :awaiting_adoption, symbol: "ORBITALIST"} =
                FleetGeneration.registration_recovery(scope)
-
-      assert %{status: :awaiting_adoption, symbol: "ORBITALIST"} =
-               SpaceTraders.MissionControl.overview(scope).registration_recovery
 
       assert agents(scope) == []
       assert {:ok, %{state: :empty}} = FleetGeneration.current_fleet(scope)
@@ -982,7 +923,6 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
       refute_received {:game_request, _, _, _}
       assert_sole_successor(scope, predecessor, ["RESETME-1", "RESETME-2"])
       assert FleetGeneration.registration_recovery(scope).status == :clear
-      assert OperatorConditions.unresolved(scope) == []
     end
   end
 
