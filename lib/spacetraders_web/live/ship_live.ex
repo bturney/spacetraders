@@ -136,6 +136,13 @@ defmodule SpaceTradersWeb.ShipLive do
           </div>
         </.card>
 
+        <.card :if={@why.last_skipped_buy} id="ship-skipped-buy">
+          <.eyebrow>
+            Last skipped buy<:right>{clock(@why.last_skipped_buy.at)}</:right>
+          </.eyebrow>
+          <p class="mt-1 text-xs">{skipped_buy(@why.last_skipped_buy)}</p>
+        </.card>
+
         <.card :if={@why.options != []} id="ship-options">
           <.eyebrow>
             Options it had<:right>credits per Ship-hour</:right>
@@ -264,6 +271,23 @@ defmodule SpaceTradersWeb.ShipLive do
     name = good |> String.split("_") |> Enum.map_join(" ", &String.capitalize/1)
     "#{name} #{code(source)}→#{code(destination)}"
   end
+
+  # The price guardrail refused the buy; a later completed buy is the replan.
+  defp skipped_buy(skip) do
+    what = "#{good_name(skip.good)} at #{code(skip.waypoint)}"
+
+    why =
+      if skip.observed_price && skip.max_price,
+        do:
+          "live price #{format_int(skip.observed_price)} was above the planned maximum #{format_int(skip.max_price)} (price guardrail)",
+        else: "the buy step ended infeasible"
+
+    outcome = if skip.replanned?, do: "Replanned and bought since.", else: "Not bought since."
+    "Skipped buying #{what}: #{why}. #{outcome}"
+  end
+
+  defp good_name(nil), do: "goods"
+  defp good_name(good), do: good |> String.split("_") |> Enum.map_join(" ", &String.capitalize/1)
 
   defp code(symbol), do: ShipRow.waypoint_code(symbol) || "—"
 

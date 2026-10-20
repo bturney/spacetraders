@@ -3,6 +3,7 @@ defmodule SpaceTradersWeb.ShipLiveTest do
   use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Ecto.Query, only: [from: 2]
 
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
@@ -48,6 +49,46 @@ defmodule SpaceTradersWeb.ShipLiveTest do
     assert has_element?(view, "#ship-history [id^=trade-]")
     assert render(view) =~ "Trading"
 
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "a Ship that skipped a buy names the good, Waypoint, live price and planned maximum",
+       %{conn: conn} do
+    seeded = ScenarioSeeds.seed(:healthy, 2)
+    ship = SpaceTraders.Repo.get_by!(SpaceTraders.Fleet.Ship, symbol: "SEEDED-1")
+
+    template =
+      SpaceTraders.Repo.one!(
+        from(i in SpaceTraders.Fleet.Intent, where: i.ship_id == ^ship.id, limit: 1)
+      )
+
+    SpaceTraders.Repo.insert!(%{
+      template
+      | id: nil,
+        type: "buy",
+        status: "infeasible",
+        target_waypoint: "X1-UX81-A1",
+        parameters: %{"trade_symbol" => "FUEL"},
+        last_action_result: %{
+          "outcome" => "infeasible",
+          "evidence" => %{
+            "reason" => "price_constraint",
+            "observed_price" => 66,
+            "max_price" => 63
+          }
+        },
+        finished_at: DateTime.utc_now(:second)
+    })
+
+    operator = SpaceTraders.Repo.get!(SpaceTraders.Agent.Operator, seeded.generation.operator_id)
+    {:ok, view, _html} = live(log_in_operator(conn, operator), ~p"/ships/SEEDED-1")
+
+    card = view |> element("#ship-skipped-buy") |> render()
+    assert card =~ "Fuel"
+    assert card =~ "A1"
+    assert card =~ "66"
+    assert card =~ "63"
+    assert card =~ "price guardrail"
     refute_received {:transport_receipt, _, _}
   end
 

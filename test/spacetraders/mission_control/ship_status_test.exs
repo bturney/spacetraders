@@ -149,6 +149,16 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     assert status.phrase == "3 skipped buys in 30 min"
   end
 
+  test "the skipped-buys phrase names the latest skip's good and prices (#813)", ctx do
+    aged(ctx, 2 * 3600)
+    skipped_buys(ctx, 2, 20 * 60, price_skip(20, 18), "IRON_ORE")
+    skipped_buys(ctx, 1, 5 * 60, price_skip(66, 63), "FUEL")
+
+    status = status(ctx)
+    assert status.kind == :busy_skipping_buys
+    assert status.phrase == "3 skipped buys in 30 min; last FUEL 66 > 63"
+  end
+
   test "a profitable Ship with skipped buys is Busy skipping buys, not Busy not earning", ctx do
     aged(ctx, 7 * 3600)
     earnings(ctx, 5_000, 3 * 3600)
@@ -270,15 +280,28 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     )
   end
 
-  defp skipped_buys(ctx, count, seconds_ago) do
+  defp skipped_buys(ctx, count, seconds_ago, result \\ nil, good \\ "IRON_ORE") do
     for _ <- 1..count do
       Repo.insert!(%{
         ctx.intent
         | id: nil,
           status: "infeasible",
+          parameters: %{"trade_symbol" => good},
+          last_action_result: result,
           finished_at: DateTime.add(ctx.now, -seconds_ago)
       })
     end
+  end
+
+  defp price_skip(observed, max) do
+    %{
+      "outcome" => "infeasible",
+      "evidence" => %{
+        "reason" => "price_constraint",
+        "observed_price" => observed,
+        "max_price" => max
+      }
+    }
   end
 
   defp earnings(ctx, net, seconds_ago, ship_seconds \\ 600) do
