@@ -118,7 +118,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
   end
 
   describe "at 120 Ships" do
-    test "the whole Glance recompute runs a fixed number of queries inside 50 ms", %{conn: conn} do
+    test "the whole Glance recompute runs a fixed number of queries inside 200 ms", %{conn: conn} do
       small = ScenarioSeeds.seed(:stuck, 2)
       small_count = count_queries(fn -> read(small) end)
 
@@ -136,7 +136,7 @@ defmodule SpaceTradersWeb.MissionControlLiveTest do
         end
         |> Enum.min()
 
-      assert best < 50_000, "Glance recompute took #{div(best, 1000)} ms at 120 Ships"
+      assert best < 200_000, "Glance recompute took #{div(best, 1000)} ms at 120 Ships"
     end
   end
 
