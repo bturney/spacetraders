@@ -12,6 +12,10 @@ defmodule SpaceTraders.MissionControl.ShipWhy do
       chart;
     * a Ship in a Neutral Wait carries `wait`: the best option the wait found,
       when it last checked and when it checks again;
+    * `last_skipped_buy` is the Ship's most recent buy step that ended
+      infeasible (#813): good, Waypoint, live price, planned maximum, time,
+      and whether a later buy completed (`replanned?`: a successful replan,
+      not an abandoned trade). A price refusal is the guardrail working;
     * a stuck Ship's reason, retries and next attempt are in `status`;
     * `history` is its last 10 Earnings records: expected vs actual.
 
@@ -58,9 +62,41 @@ defmodule SpaceTraders.MissionControl.ShipWhy do
       credits_per_hour: status.credits_per_hour,
       choice: choice,
       options: options(choice),
+      last_skipped_buy: last_skipped_buy(ship),
       wait: if(status.kind == :waiting and is_nil(choice), do: wait(generation)),
       history: history(generation, ship.symbol)
     }
+  end
+
+  ## The last skipped buy
+
+  defp last_skipped_buy(ship) do
+    skipped =
+      Repo.one(
+        from i in Intent,
+          where: i.ship_id == ^ship.id and i.type == "buy" and i.status == "infeasible",
+          order_by: [desc: i.finished_at, desc: i.id],
+          limit: 1
+      )
+
+    if skipped do
+      reason = ShipStatus.skip_reason(skipped) || %{}
+
+      %{
+        good: reason[:good] || skipped.parameters["trade_symbol"],
+        waypoint: skipped.target_waypoint,
+        observed_price: reason[:observed_price],
+        max_price: reason[:max_price],
+        at: skipped.finished_at,
+        replanned?:
+          Repo.exists?(
+            from i in Intent,
+              where:
+                i.ship_id == ^ship.id and i.type == "buy" and i.status == "completed" and
+                  i.finished_at >= ^skipped.finished_at
+          )
+      }
+    end
   end
 
   ## The trade it chose

@@ -173,6 +173,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     end
   end
 
+  # Per Ship: how many buys were skipped in the window, and the latest one's
+  # reason (its good and the two prices, when it was a price refusal).
   defp skipped_buys(ship_ids, now) do
     since = DateTime.add(now, -@skipped_buy_window_seconds)
 
@@ -180,11 +182,37 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       where:
         i.ship_id in ^ship_ids and i.type == "buy" and i.status == "infeasible" and
           i.finished_at >= ^since,
-      group_by: i.ship_id,
-      select: {i.ship_id, count(i.id)}
+      order_by: [asc: i.finished_at, asc: i.id]
     )
     |> Repo.all()
-    |> Map.new()
+    |> Enum.group_by(& &1.ship_id)
+    |> Map.new(fn {ship_id, intents} ->
+      {ship_id, %{count: length(intents), last: skip_reason(List.last(intents))}}
+    end)
+  end
+
+  @doc """
+  Why a buy step was skipped: `%{good, observed_price, max_price}` when its
+  stored evidence is a price refusal, else `nil` (#813).
+  """
+  def skip_reason(%Intent{} = intent) do
+    case intent.last_action_result do
+      %{
+        "evidence" => %{
+          "reason" => "price_constraint",
+          "observed_price" => observed,
+          "max_price" => limit
+        }
+      } ->
+        %{
+          good: (intent.parameters || %{})["trade_symbol"],
+          observed_price: observed,
+          max_price: limit
+        }
+
+      _ ->
+        nil
+    end
   end
 
   defp earnings(nil, _symbols, _now, _thresholds), do: %{}
@@ -269,7 +297,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     {status, details} =
       stuck(intent, assignment, facts.stall) ||
         waiting(assignment, facts.neutral_wait) ||
-        busy_not_earning(ship, facts.skipped[ship.id] || 0, earned, facts.thresholds, now) ||
+        busy_not_earning(ship, facts.skipped[ship.id] || %{count: 0}, earned, facts.thresholds, now) ||
         working(assignment, intent, ship, facts)
 
     base
@@ -321,7 +349,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
   defp waiting(_assignment, _wait), do: nil
 
-  defp busy_not_earning(ship, skipped, earned, thresholds, now) do
+  defp busy_not_earning(ship, %{count: skipped} = skips, earned, thresholds, now) do
     %{earning_ratio: ratio, hour_seconds: hour, average_window_seconds: window} = thresholds
     history = DateTime.diff(now, ship.inserted_at)
 
@@ -349,13 +377,19 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
              }}
 
           skipped >= @skipped_buys ->
-            {:busy_skipping_buys, %{phrase: "#{skipped} skipped buys in 30 min"}}
+            {:busy_skipping_buys, %{phrase: skipped_phrase(skipped, skips[:last])}}
 
           true ->
             nil
         end
     end
   end
+
+  defp skipped_phrase(count, %{good: good, observed_price: observed, max_price: limit})
+       when is_binary(good),
+       do: "#{count} skipped buys in 30 min; last #{good} #{observed} > #{limit}"
+
+  defp skipped_phrase(count, _last), do: "#{count} skipped buys in 30 min"
 
   defp working(nil, _intent, _ship, _facts),
     do: {:waiting, %{phrase: "Waiting for new orders"}}
