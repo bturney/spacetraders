@@ -35,17 +35,6 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
     assert portfolio.strategy_decision_episode.inserted_at == now
     assert [%{inserted_at: ^now}] = portfolio.commitments
 
-    [commitment] = portfolio.commitments
-    buy = trade_intent!(portfolio, commitment, "buy", 100, 1)
-    Repo.update!(Ecto.Changeset.change(buy, finished_at: DateTime.truncate(now, :second)))
-    assert [%{id: buy_id}] = FleetAllocation.awaiting_sell_buys(portfolio.id)
-    assert buy_id == buy.id
-
-    SpaceTraders.TestClock.advance(120)
-    assert [%{id: ^buy_id}] = FleetAllocation.awaiting_sell_buys(portfolio.id)
-    SpaceTraders.TestClock.advance(1)
-    assert FleetAllocation.awaiting_sell_buys(portfolio.id) == []
-
     SpaceTraders.TestClock.advance(10)
 
     assert {:ok, episode} =
@@ -56,12 +45,12 @@ defmodule SpaceTraders.FleetAllocationPublishTest do
                %{"credit_change" => 100}
              )
 
-    assert episode.updated_at == ~U[2000-01-01 00:02:11.000000Z]
+    assert episode.updated_at == ~U[2000-01-01 00:00:10.000000Z]
     assert episode.inserted_at == now
 
     SpaceTraders.TestClock.advance(5)
     assert {:ok, unwound} = FleetAllocation.unwind_current_portfolio(scope, generation.id)
-    assert unwound.superseded_at == ~U[2000-01-01 00:02:16.000000Z]
+    assert unwound.superseded_at == ~U[2000-01-01 00:00:15.000000Z]
     assert FleetAllocation.current_portfolio(scope) == nil
   end
 

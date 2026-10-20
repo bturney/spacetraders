@@ -15,6 +15,122 @@ defmodule SpaceTraders.FleetIntentsTest do
   alias SpaceTraders.FleetPlanning.CandidateContribution
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
 
+  for now <- [~U[2000-01-01 00:00:00.000000Z], ~U[2099-01-01 00:00:00.000000Z]] do
+    for receipt? <- [true, false] do
+      @tag handoff_now: now
+      @tag handoff_receipt: receipt?
+      test "production buy completion (receipt: #{receipt?}) expires its handoff in semantic time at #{now}",
+           %{handoff_now: now, handoff_receipt: receipt?} do
+        start_supervised!({SpaceTraders.TestClock, now})
+        previous = Application.get_env(:spacetraders, :clock)
+        Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+
+        on_exit(fn ->
+          if previous,
+            do: Application.put_env(:spacetraders, :clock, previous),
+            else: Application.delete_env(:spacetraders, :clock)
+        end)
+
+        {agent, ship, portfolio, commitment} = claimed_ship("SEMANTIC-HANDOFF")
+        scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
+
+        intent =
+          Repo.insert!(%Intent{
+            ship_id: ship.id,
+            caller: "commitment",
+            type: "buy",
+            status: "active",
+            target_waypoint: "X1-UX81-A1",
+            parameters: %{
+              "trade_symbol" => "IRON_ORE",
+              "units" => 5,
+              "market_listing_prevalidated" => not receipt?
+            },
+            fleet_commitment_id: commitment.id,
+            fleet_commitment_portfolio_id: portfolio.id,
+            fleet_commitment_portfolio_version: portfolio.version
+          })
+
+        Req.Test.stub(SpaceTraders.API, fn conn ->
+          case {conn.method, conn.request_path} do
+            {"GET", "/v2/my/agent"} ->
+              Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+            {"GET", "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"} ->
+              Req.Test.json(conn, %{
+                "data" => %{
+                  "symbol" => "X1-UX81-A1",
+                  "tradeGoods" => [
+                    %{
+                      "symbol" => "IRON_ORE",
+                      "purchasePrice" => 10,
+                      "sellPrice" => 20,
+                      "tradeVolume" => 5
+                    }
+                  ]
+                }
+              })
+
+            {"GET", "/v2/my/ships/" <> _} ->
+              Req.Test.json(conn, %{
+                "data" =>
+                  ship_body(ship.symbol, %{
+                    "nav" => nav_body("DOCKED"),
+                    "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+                  })
+              })
+
+            {"POST", "/v2/my/ships/" <> _} ->
+              assert String.ends_with?(conn.request_path, "/purchase")
+              response = trade_response(agent, ship, "PURCHASE", 10, 50, 5)
+              response = if receipt?, do: response, else: Map.delete(response, "transaction")
+              Req.Test.json(conn, %{"data" => response})
+
+            request ->
+              flunk("unexpected request: #{inspect(request)}")
+          end
+        end)
+
+        {:ok, binding} = SpaceTraders.Evidence.get_ship_binding(agent, ship.symbol)
+
+        assert {:ok, %Intent{status: "completed"} = buy} =
+                 Intents.execute_action(
+                   agent,
+                   intent,
+                   SpaceTraders.Evidence.bound_ship(binding),
+                   %{
+                     "kind" => "buy",
+                     "trade_symbol" => "IRON_ORE",
+                     "units" => 5,
+                     "listing_price" => 10,
+                     "cargo_before" => 0,
+                     "credits_before" => 100
+                   }
+                 )
+
+        assert [%{id: buy_id}] = FleetAllocation.awaiting_sell_buys(portfolio.id)
+        assert buy_id == buy.id
+
+        assert {:error, :unresolved_commitment_evidence} =
+                 FleetAllocation.unwind_current_portfolio(scope, portfolio.fleet_generation_id)
+
+        SpaceTraders.TestClock.advance(120)
+        assert [%{id: ^buy_id}] = FleetAllocation.awaiting_sell_buys(portfolio.id)
+
+        assert {:error, :unresolved_commitment_evidence} =
+                 FleetAllocation.unwind_current_portfolio(scope, portfolio.fleet_generation_id)
+
+        SpaceTraders.TestClock.advance(1)
+        assert FleetAllocation.awaiting_sell_buys(portfolio.id) == []
+
+        assert {:ok, _unwound} =
+                 FleetAllocation.unwind_current_portfolio(scope, portfolio.fleet_generation_id)
+
+        assert buy.finished_at == DateTime.truncate(now, :second)
+      end
+    end
+  end
+
   test "a Market round trip persists and reloads JSON-safe market_trade data" do
     {agent, ship, portfolio, commitment} = claimed_ship("INTENTS-MARKET")
     ship_path = "/v2/my/ships/#{ship.symbol}"

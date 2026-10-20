@@ -20,6 +20,14 @@ facts: parsing and comparison do not shift or rewrite their values. Replacement
 of a Revision still withdraws its old demands; reconstruction cannot resurrect
 their authority. A new current-Revision demand may request the same overdue facts.
 
+The buy-to-sell handoff's **producer and consumers** use the same instant:
+`Intents.complete_cargo_intent/5` (receipt-backed or recovered completion) and
+`complete_cargo_intent_without_transaction/4` (prevalidated Cargo completion)
+write semantic `finished_at`, which allocation compares with its semantic cutoff.
+These shared Cargo completion helpers also timestamp their sell/deliver/transfer
+completions; other Intent terminal writers and schema metadata are not migrated
+by this narrow fix. Authoritative game receipt timestamps are not rewritten.
+
 ## Intentionally physical time
 
 - Authentication/sudo expiry, credential timestamps and actual DB/socket/authority
@@ -47,6 +55,14 @@ semantic refit and Construction production-transfer-delivery controls. Existing
 scheduler tests additionally cover future waits, overdue deadlines, cancellation,
 duplicate wakes and native-clock restart.
 
+The handoff regression calls production `Intents.execute_action/4` through
+recorded dispatch and Cargo completion, with receipt-backed and receipt-free
+responses, at semantic dates both behind and ahead of physical time. Without a
+continuation, the completed buy blocks unwind at completion and exactly 120
+seconds; at 121 seconds it disappears from pending sell handoffs and unwind is
+allowed. No completed Intent or `finished_at` is manufactured/repaired by the
+test.
+
 **This is not real-HTTP, complete-drain or full-world qualification.** Concrete
 uncovered consumers prevent promoting these results into a broader supported
 profile:
@@ -54,7 +70,8 @@ profile:
 - `Contracts.DeadlineServer` arms authoritative Timeline deadlines through Clock,
   but is not a NavigationParticipant; its dynamic callbacks are not covered by
   the closed navigation profile's drain proof.
-- Ship Intent schema/terminal timestamps, several Intent freshness consumers,
+- Ship Intent schema timestamps and terminal writers outside the two Cargo
+  completion helpers above, several Intent freshness consumers,
   MutationAttempts outcome `recorded_at`, and Mission Control evidence-age/
   availability projections still include wall-time chronology outside this
   selected reconciliation slice. In-process completion does not qualify their
