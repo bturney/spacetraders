@@ -165,7 +165,18 @@ defmodule SpaceTraders.FleetGeneration do
   def resume_reset_replacement do
     case current_fleet() do
       {:ok, %{state: :transition, operator: %Operator{} = operator}} ->
-        replace_after_reset(Scope.for_operator(operator))
+        scope = Scope.for_operator(operator)
+
+        case replace_after_reset(scope) do
+          # A registration lost at the reset settles from the public Agent
+          # read; only a proven absence lets the replacement register again.
+          {:error, :registration_unresolved} ->
+            with {:ok, :clear} <- reconcile_registration(scope),
+                 do: replace_after_reset(scope)
+
+          result ->
+            result
+        end
 
       _ ->
         {:error, :no_server_reset}

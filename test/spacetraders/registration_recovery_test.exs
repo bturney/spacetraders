@@ -632,6 +632,10 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
           {"GET", "/v2/my/agent"} ->
             reset_mismatch(conn)
 
+          # Occupied: the public read cannot settle the attempt.
+          {"GET", "/v2/agents/RESETME"} ->
+            Req.Test.json(conn, public_agent("RESETME"))
+
           {"POST", "/v2/register"} ->
             send(parent, {:registering, self()})
 
@@ -841,10 +845,35 @@ defmodule SpaceTraders.RegistrationRecoveryTest do
 
       assert_received {:game_request, "GET", "/v2/my/agent", nil}
       assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      assert_received {:game_request, "GET", "/v2/agents/RESETME", nil}
+      assert_received {:game_request, "GET", "/v2/agents/RESETME", nil}
       refute_received {:game_request, _, _, _}
       assert [%{id: id, agent_token: "FIRST_SECRET"}] = agents(scope)
       assert id == predecessor.id
       assert {:error, :stale_agent} = FleetGeneration.gameplay_authority(id)
+
+      # The game reset under the lost registration: the public read proves
+      # the symbol absent, so resume settles it and replaces without the Operator.
+      game(fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v2/agents/RESETME"} ->
+            conn
+            |> Plug.Conn.put_status(404)
+            |> Req.Test.json(%{"error" => %{"code" => 404, "message" => "Agent not found"}})
+
+          {"POST", "/v2/register"} ->
+            Req.Test.json(conn, registration("RESETME", "SECOND_SECRET"))
+        end
+      end)
+
+      assert {:ok, %{agent: %{symbol: "RESETME"}}} =
+               in_session(fn -> FleetGeneration.resume_reset_replacement() end)
+
+      assert_received {:game_request, "GET", "/v2/agents/RESETME", nil}
+      assert_received {:game_request, "POST", "/v2/register", "RESETME"}
+      refute_received {:game_request, _, _, _}
+      assert %{status: :clear} = FleetGeneration.registration_recovery(scope)
+      assert_sole_successor(scope, predecessor)
     end
 
     test "a proven success interrupted before adoption is adopted on restart without mint authority",

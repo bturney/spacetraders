@@ -98,10 +98,24 @@ defmodule SpaceTradersWeb.GenerationsLiveTest do
       classification: :partially_realized
     })
 
+    # Unevidenced outcomes never count toward the realized credit change.
+    Repo.insert!(%StrategyDecisionEpisode{
+      operator_id: operator.id,
+      fleet_generation_id: old.id,
+      fleet_strategy_revision_id: revision.id,
+      source_version: 2,
+      calibration_version: "v1",
+      classification: :realized,
+      evidence_references: [],
+      actual_outcomes: %{"net_credit_change" => 1_000_000}
+    })
+
     {:ok, view, html} = live(conn, ~p"/generations")
     assert html =~ "Generation 1"
     assert html =~ "Generation 2"
     assert html =~ "250 credits"
+    refute html =~ "1,000,250"
+    refute html =~ "1000250"
     assert html =~ "Grow credits: 20.0 per horizon"
     assert html =~ "Strategy revision 2"
     assert html =~ "Unknown — no realized credit evidence"
