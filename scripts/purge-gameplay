@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# Purge every piece of gameplay, Generation and observability data while
+# preserving the deployment Operator (password and AccountToken ciphertext).
+#
+# The operator row is the only thing worth keeping: its hashed password and
+# encrypted AccountToken are what let the Operator log in and mint or import a
+# new Agent afterwards. current_fleet_identity is rebuilt with a NULL
+# Generation so boot reaches the :empty state instead of :transition (which
+# would auto-register a replacement Agent).
+set -Eeuo pipefail
+
+readonly OPERATION_ID=${OPERATION_ID:-purge-gameplay-$(date -u +%Y%m%dT%H%M%SZ)-$$}
+if [[ -n "${SPACETRADERS_BUNDLE_DIR:-}" ]]; then
+  readonly DEPLOY_DIR=${SPACETRADERS_DEPLOY_DIR:?set SPACETRADERS_DEPLOY_DIR}
+  readonly COMPOSE=(docker compose --project-name spacetraders --env-file "$DEPLOY_DIR/.env"
+    -f "$SPACETRADERS_BUNDLE_DIR/compose.yaml"
+    -f "$SPACETRADERS_BUNDLE_DIR/compose.production.yaml")
+else
+  readonly COMPOSE=(docker compose)
+fi
+
+readonly PRESERVED=(operators operators_tokens runtime_authority agent_name_bank_entries)
+readonly TRUNCATED=(agents ships ship_cargo fleet_generations fleet_strategies
+  fleet_strategy_revisions intents surveys fleet_commitment_portfolios fleet_commitments
+  fleet_commitment_claims strategy_decision_episodes allocation_result_pointers earnings_records
+  timeline_events fleet_activity ship_destination_history intelligence_observations
+  intelligence_facts authoritative_observations observation_demands credit_calibration_versions
+  credit_shortfalls credit_realizations outbox_notifications mutation_attempts
+  mutation_attempt_outcomes current_fleet_identity)
+
+CURRENT_OPERATION=initialization
+STOPPED=0
+
+log() {
+  printf 'operation_id=%s operation=%s status=%s%s\n' \
+    "$OPERATION_ID" "$1" "$2" "${3:+ $3}"
+}
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+failure() {
+  local status=$?
+  trap - ERR
+  log "$CURRENT_OPERATION" failed "exit_code=$status"
+  exit "$status"
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  if [[ "$STOPPED" == 1 ]]; then
+    if "${COMPOSE[@]}" start web; then
+      log start_web completed
+    else
+      log start_web failed "set STOPPED=0"
+    fi
+  fi
+  exit "$status"
+}
+
+trap failure ERR
+trap cleanup EXIT
+
+readonly POSTGRES_DB=$("${COMPOSE[@]}" exec -T postgres sh -c 'printf %s "$POSTGRES_DB"')
+readonly POSTGRES_USER=$("${COMPOSE[@]}" exec -T postgres sh -c 'printf %s "$POSTGRES_USER"')
+
+psql_command() {
+  "${COMPOSE[@]}" exec -T postgres \
+    psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc \
+    --set=ON_ERROR_STOP=1 "$@" </dev/null
+}
+
+psql_stdin() {
+  "${COMPOSE[@]}" exec -T postgres \
+    psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc \
+    --set=ON_ERROR_STOP=1 "$@"
+}
+
+sql_list() {
+  local item
+  local separator=
+  for item in "$@"; do
+    printf '%s%s' "$separator" "$item"
+    separator=','
+  done
+}
+
+assert_schema() {
+  local missing
+  local unexpected
+  local operators
+
+  missing=$(psql_command --tuples-only --no-align --command "
+    SELECT string_agg(name, ', ' ORDER BY name)
+    FROM unnest(string_to_array('$(sql_list "${PRESERVED[@]}" "${TRUNCATED[@]}")', ',')) AS name
+    WHERE to_regclass(format('public.%I', name)) IS NULL")
+
+  [[ -z "$missing" ]] || die "Missing expected tables: $missing"
+
+  unexpected=$(psql_command --tuples-only --no-align --command "
+    SELECT string_agg(tablename, ', ' ORDER BY tablename)
+    FROM pg_tables
+    WHERE schemaname = 'public'
+      AND tablename <> 'schema_migrations'
+      AND tablename <> ALL (string_to_array('$(sql_list "${PRESERVED[@]}" "${TRUNCATED[@]}")', ','))")
+
+  [[ -z "$unexpected" ]] ||
+    die "Unexpected public tables (new migration?): $unexpected. Update scripts/purge-gameplay."
+
+  operators=$(psql_command --tuples-only --no-align --command \
+    "SELECT count(*) FROM operators")
+
+  [[ "$operators" == 1 ]] ||
+    die "Expected exactly one Operator row, found $operators. Nothing was deleted."
+}
+
+dry_run() {
+  CURRENT_OPERATION=dry_run
+  assert_schema
+
+  psql_command --command \
+    "SELECT relname AS table, n_live_tup AS approx_rows
+     FROM pg_stat_user_tables
+     WHERE schemaname = 'public'
+     ORDER BY n_live_tup DESC, relname;"
+
+  psql_command --command \
+    "SELECT identity.id, identity.operator_id, identity.fleet_generation_id,
+            identity.contract_version,
+            (SELECT count(*) FROM agents) AS agents,
+            (SELECT count(*) FROM fleet_generations) AS generations
+     FROM current_fleet_identity AS identity
+     WHERE identity.id = 1;"
+
+  printf 'operation_id=%s operation=purge_gameplay status=dry_run tables=%s\n' \
+    "$OPERATION_ID" "${#TRUNCATED[@]}"
+  printf 'Preserved: %s\n' "${PRESERVED[*]}"
+  printf 'Truncated: %s\n' "${TRUNCATED[*]}"
+  printf 'Run with --execute to purge. No backup is taken; TRUNCATE is irreversible.\n'
+}
+
+verify_empty() {
+  local table
+  local count
+
+  for table in "${TRUNCATED[@]}"; do
+    [[ "$table" == current_fleet_identity ]] && continue
+    count=$(psql_command --tuples-only --no-align --command \
+      "SELECT count(*) FROM public.\"$table\"")
+    [[ "$count" == 0 ]] || die "Table $table still has $count rows"
+  done
+
+  count=$(psql_command --tuples-only --no-align --command \
+    "SELECT count(*) FROM current_fleet_identity WHERE id = 1 AND fleet_generation_id IS NULL")
+  [[ "$count" == 1 ]] || die "current_fleet_identity was not rebuilt with a NULL Generation"
+
+  count=$(psql_command --tuples-only --no-align --command \
+    "SELECT count(*) FROM operators")
+  [[ "$count" == 1 ]] || die "Operator row was not preserved"
+
+  count=$(psql_command --tuples-only --no-align --command \
+    "SELECT count(*) FROM agents")
+  [[ "$count" == 0 ]] || die "Agent rows were not purged"
+
+  psql_command --tuples-only --no-align --command "SELECT preflight_current_fleet()" |
+    grep -qx t || die "preflight_current_fleet() rejected the rebuilt identity"
+}
+
+execute() {
+  CURRENT_OPERATION=execute
+  assert_schema
+
+  CURRENT_OPERATION=stop_web
+  "${COMPOSE[@]}" stop --timeout 60 web
+  STOPPED=1
+
+  CURRENT_OPERATION=truncate
+  psql_stdin <<SQL
+BEGIN;
+SET LOCAL lock_timeout = '15s';
+TRUNCATE TABLE $(sql_list "${TRUNCATED[@]}") RESTART IDENTITY;
+INSERT INTO current_fleet_identity (id, operator_id, fleet_generation_id, contract_version)
+SELECT 1, id, NULL, 1 FROM operators;
+SELECT preflight_current_fleet() AS preflight;
+COMMIT;
+SQL
+
+  CURRENT_OPERATION=verify
+  verify_empty
+
+  CURRENT_OPERATION=start_web
+  "${COMPOSE[@]}" start web
+  STOPPED=0
+
+  log purge_gameplay completed "tables=${#TRUNCATED[@]}"
+  log start_web completed
+}
+
+case "${1:-}" in
+  --dry-run) dry_run ;;
+  --execute) execute ;;
+  *) die "Usage: scripts/purge-gameplay {--dry-run|--execute}" ;;
+esac
