@@ -244,10 +244,23 @@ defmodule SpaceTraders.MissionControl do
   defp deployment_generation_recaps(scope, _operator_id) do
     generations = FleetGeneration.list_generations(scope)
 
+    # Only the facts a recap reads: decoding every episode's evidence and
+    # alternatives outlives the connection checkout on a long-lived deployment.
     episodes =
       Repo.all(
         from episode in StrategyDecisionEpisode,
-          select: episode
+          select: %{
+            id: episode.id,
+            fleet_generation_id: episode.fleet_generation_id,
+            fleet_strategy_revision_id: episode.fleet_strategy_revision_id,
+            classification: episode.classification,
+            evidenced?: fragment("cardinality(?) > 0", episode.evidence_references),
+            actual_outcomes:
+              fragment(
+                "COALESCE((SELECT jsonb_object_agg(key, value) FROM jsonb_each(?) WHERE key IN ('net_credit_change', 'credit_change')), '{}'::jsonb)",
+                episode.actual_outcomes
+              )
+          }
       )
       |> Enum.group_by(& &1.fleet_generation_id)
 
@@ -259,9 +272,8 @@ defmodule SpaceTraders.MissionControl do
       decisions = episodes |> Map.get(generation.id, []) |> Enum.sort_by(& &1.id, :desc)
 
       credit_changes =
-        for %{classification: :realized, actual_outcomes: outcomes, evidence_references: refs} <-
+        for %{classification: :realized, actual_outcomes: outcomes, evidenced?: true} <-
               decisions,
-            refs != [],
             change = actual_credit_change(outcomes),
             is_number(change),
             do: change
