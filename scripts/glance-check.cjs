@@ -56,6 +56,8 @@ const check = (ok, message) => {
   })
 
   await page.goto(`${base}/operators/log-in`)
+  // The login form submits through LiveView: fill it once connected.
+  await page.waitForSelector(".phx-connected")
   await page.fill("#login_form_password input[type=email]", process.env.EMAIL)
   await page.fill("#login_form_password input[type=password]", process.env.PASSWORD)
   await Promise.all([
