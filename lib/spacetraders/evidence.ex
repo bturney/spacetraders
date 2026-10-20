@@ -253,7 +253,7 @@ defmodule SpaceTraders.Evidence do
         source.agent_id == ^agent.id and source.subject == ^subject and
           source.operation_id == ^operation_id and source.observed_at >= ^since and
           source.observed_at >= ^oldest and source.observed_at <= ^now,
-      order_by: [desc: source.observed_at, desc: source.id]
+      order_by: [desc: source.observed_at, desc: source.inserted_at, desc: source.id]
     )
     |> Repo.all()
     |> Enum.find_value(fn source ->
@@ -296,7 +296,11 @@ defmodule SpaceTraders.Evidence do
       when is_binary(subject) and subject != "" do
     Observation
     |> where([observation], observation.agent_id == ^agent.id and observation.subject == ^subject)
-    |> order_by([observation], desc: observation.observed_at, desc: observation.id)
+    |> order_by([observation],
+      desc: observation.observed_at,
+      desc: observation.inserted_at,
+      desc: observation.id
+    )
     |> limit(1)
     |> Repo.one()
   end
@@ -1341,7 +1345,7 @@ defmodule SpaceTraders.Evidence do
         operation_id,
         dependency_keys,
         facts,
-        observed_at \\ DateTime.utc_now()
+        observed_at \\ Clock.utc_now()
       )
       when is_list(dependency_keys) and is_map(facts) and map_size(facts) > 0 do
     %{classification: :read} = OperationInventory.fetch!(operation_id)
@@ -1361,7 +1365,7 @@ defmodule SpaceTraders.Evidence do
         %Attempt{} = attempt,
         outcome,
         basis,
-        observed_at \\ DateTime.utc_now()
+        observed_at \\ Clock.utc_now()
       )
       when outcome in [:accepted, :absent, :bounded_unknown] and is_binary(basis) and basis != "" do
     authoritative_observation(

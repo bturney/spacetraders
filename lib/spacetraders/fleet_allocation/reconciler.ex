@@ -2,6 +2,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   @moduledoc "Routes governed evidence boundaries into Fleet Allocation and capability reconciliation."
 
   use GenServer
+  use SpaceTraders.Simulation.NavigationParticipant
 
   require Logger
 
@@ -22,31 +23,32 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Repo
+  alias SpaceTraders.Clock
 
   @refresh_ms 60_000
 
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  @impl true
-  def init(_opts) do
+  def init_participant(_opts) do
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_market_evidence")
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_intelligence_evidence")
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "fleet_resource_evidence")
     # Durable Evidence scheduler announcements for due Observation Demands.
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "observation_demands")
     send(self(), :reconcile_intelligence_on_boot)
-    Process.send_after(self(), :reconcile_durable_work, @refresh_ms)
-    {:ok, %{}}
+    {:ok, arm_refresh()}
   end
 
-  @impl true
-  def handle_info({:market_evidence_observed, agent_id, "market:" <> system_and_waypoint}, state) do
+  def handle_participant_info(
+        {:market_evidence_observed, agent_id, "market:" <> system_and_waypoint},
+        state
+      ) do
     system_symbol = system_and_waypoint |> String.split(":", parts: 2) |> hd()
     observe_market_evidence(agent_id, system_symbol)
     {:noreply, state}
   end
 
-  def handle_info(
+  def handle_participant_info(
         {:outbox, _id, "market_purchase_withdrawn",
          %{"agent_id" => agent_id, "waypoint" => waypoint}},
         state
@@ -56,12 +58,12 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     {:noreply, state}
   end
 
-  def handle_info({:waypoint_intelligence_observed, agent_id, system_symbol}, state) do
+  def handle_participant_info({:waypoint_intelligence_observed, agent_id, system_symbol}, state) do
     observe_waypoint_intelligence(agent_id, system_symbol)
     {:noreply, state}
   end
 
-  def handle_info({:resource_cooldown_recovered, agent_id, system_symbol}, state) do
+  def handle_participant_info({:resource_cooldown_recovered, agent_id, system_symbol}, state) do
     with_context(agent_id, fn scope, agent, revision ->
       FleetResources.reconcile(scope, agent, revision, system_symbol)
       FleetContracts.reconcile(scope, agent, revision)
@@ -73,13 +75,16 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     {:noreply, state}
   end
 
-  def handle_info(:reconcile_intelligence_on_boot, state) do
+  def handle_participant_info(:reconcile_intelligence_on_boot, state) do
     case FleetAllocation.current_generation() do
       %Generation{agent_id: agent_id} ->
         agent = Repo.get!(AgentRecord, agent_id)
 
         if system = system_for(agent) do
           send(self(), {:waypoint_intelligence_observed, agent_id, system})
+        else
+          # Contract/Construction recovery does not depend on Market location.
+          reconcile_durable_work()
         end
 
       _ ->
@@ -89,19 +94,29 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     {:noreply, state}
   end
 
-  def handle_info(:reconcile_durable_work, state) do
+  def handle_participant_info(
+        {:reconcile_durable_work, token},
+        %{refresh_token: token} = state
+      )
+      when is_reference(token) do
+    Clock.cancel_timer(state.refresh_ref)
     reconcile_durable_work()
-    Process.send_after(self(), :reconcile_durable_work, @refresh_ms)
-    {:noreply, state}
+    {:noreply, arm_refresh()}
   end
 
-  def handle_info({:observation_demand_due, agent_id, _subjects}, state) do
+  def handle_participant_info({:observation_demand_due, agent_id, _subjects}, state) do
     wake_due_demands(agent_id)
 
     {:noreply, state}
   end
 
-  def handle_info(_message, state), do: {:noreply, state}
+  def handle_participant_info(_message, state), do: {:noreply, state}
+
+  defp arm_refresh do
+    token = make_ref()
+    reference = Clock.send_after(self(), {:reconcile_durable_work, token}, @refresh_ms)
+    %{refresh_token: token, refresh_ref: reference}
+  end
 
   @doc """
   Wakes Strategy reconciliation for a Generation whose Observation Demands came

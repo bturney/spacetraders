@@ -15,6 +15,40 @@ defmodule SpaceTraders.MutationAttemptsTest do
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.SafetyFence
 
+  test "registration recovery follows durable creation order when semantic preparation times tie" do
+    operator = operator_fixture()
+    scope = Scope.for_operator(operator)
+    prepared_at = ~U[2026-10-19 05:07:18.000000Z]
+
+    # Retained history and a later replacement can share a frozen semantic
+    # instant. UUID order must not hide the newer registration's uncertainty.
+    for {id, state, inserted_at} <- [
+          {"ffffffff-ffff-4fff-bfff-ffffffffffff", "rejected", ~U[2026-10-19 05:08:18.000001Z]},
+          {"00000000-0000-4000-8000-000000000001", "ambiguous", ~U[2026-10-19 05:08:18.000002Z]}
+        ] do
+      Repo.insert!(%MutationAttempts.Attempt{
+        id: id,
+        operator_id: operator.id,
+        operation_id: "register",
+        operation_owner: "fleet_generation",
+        state: state,
+        prepared_at: prepared_at,
+        sent_or_unknown_at: prepared_at,
+        inserted_at: inserted_at,
+        request_fingerprint: id,
+        prepared_evidence: %{"request" => %{"body" => %{"symbol" => "RESETME"}}},
+        expected_effects: [],
+        consequence_bounds: []
+      })
+    end
+
+    assert %{id: "00000000-0000-4000-8000-000000000001", state: "ambiguous"} =
+             MutationAttempts.latest_registration(operator.id)
+
+    assert %{status: :unresolved, symbol: "RESETME"} =
+             SpaceTraders.FleetGeneration.registration_recovery(scope)
+  end
+
   test "a mutation is durable and sent-or-unknown before network dispatch" do
     operator = operator_fixture()
     agent = agent_fixture(operator, %{agent_token: "AGENT_TOKEN_SECRET"})

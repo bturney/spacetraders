@@ -28,6 +28,8 @@ defmodule SpaceTraders.API.RateLimiter do
   """
 
   use GenServer
+  alias SpaceTraders.API.ScarcityClock
+  alias SpaceTraders.Simulation.{NavigationClock, NavigationParticipant}
 
   @type t :: %__MODULE__{
           tokens: float(),
@@ -47,7 +49,8 @@ defmodule SpaceTraders.API.RateLimiter do
             pool_burst: 0,
             pool_rate: 0.0,
             last_refill: 0,
-            clock: nil
+            clock: nil,
+            release: nil
 
   @doc "Starts the limiter. Options: `:name`, `:rate`, `:burst`, `:pool_rate`, `:pool_burst`, and a `:clock` with monotonic-millisecond `now/0` and `sleep/1` callbacks."
   def start_link(opts \\ []) do
@@ -58,15 +61,31 @@ defmodule SpaceTraders.API.RateLimiter do
   @doc """
   Waits until a token is available, then consumes one and returns `:ok`.
 
-  Returns immediately when no limiter process is running under `name` (the
-  disabled-in-test behaviour).
+  Only explicit `enabled: false` configuration disables this gate. Missing
+  enabled authority fails closed, including startup and restart races.
   """
-  @spec acquire(GenServer.server()) :: :ok
+  @spec acquire(GenServer.server()) :: :ok | {:error, :capacity_unavailable}
   def acquire(name \\ __MODULE__) do
     case Process.whereis(name) do
-      nil -> :ok
+      nil -> missing()
       pid -> acquire_from(pid)
     end
+  end
+
+  @doc "Consumes one protocol token, or returns its semantic release without blocking the owner."
+  def try_acquire(name \\ __MODULE__) do
+    case Process.whereis(name) do
+      nil -> missing()
+      pid -> GenServer.call(pid, :try_acquire)
+    end
+  catch
+    :exit, _ -> {:error, :capacity_unavailable}
+  end
+
+  defp missing do
+    if Application.get_env(:spacetraders, __MODULE__, [])[:enabled] == false,
+      do: :ok,
+      else: {:error, :capacity_unavailable}
   end
 
   defp acquire_from(pid) do
@@ -77,11 +96,17 @@ defmodule SpaceTraders.API.RateLimiter do
       {:wait, ms, sleep} ->
         sleep.(ms)
         acquire_from(pid)
+
+      {:error, :capacity_unavailable} = error ->
+        error
     end
+  catch
+    :exit, _ -> {:error, :capacity_unavailable}
   end
 
   @impl true
   def init(opts) do
+    if NavigationClock.enabled?(), do: NavigationClock.register(self(), __MODULE__)
     config = Application.get_env(:spacetraders, __MODULE__, [])
     rate = Keyword.get(opts, :rate, Keyword.get(config, :rate, 2.0))
     burst = Keyword.get(opts, :burst, Keyword.get(config, :burst, 2))
@@ -90,7 +115,7 @@ defmodule SpaceTraders.API.RateLimiter do
 
     clock =
       Keyword.get(opts, :clock, %{
-        now: fn -> System.monotonic_time(:millisecond) end,
+        now: &refill_now/0,
         sleep: &Process.sleep/1
       })
 
@@ -108,7 +133,13 @@ defmodule SpaceTraders.API.RateLimiter do
   end
 
   @impl true
-  def handle_call(:acquire, _from, state) do
+  def handle_call(:simulation_barrier, _from, state),
+    do: {:reply, %{unresolved: 0, release_at: state.release && elem(state.release, 2)}, state}
+
+  def handle_call(message, from, state),
+    do: NavigationParticipant.work(fn -> handle_protocol_call(message, from, state) end)
+
+  defp handle_protocol_call(message, _from, state) when message in [:acquire, :try_acquire] do
     state = refill(state)
 
     cond do
@@ -119,13 +150,43 @@ defmodule SpaceTraders.API.RateLimiter do
         {:reply, :ok, %{state | pool_tokens: state.pool_tokens - 1}}
 
       true ->
-        {:reply, {:wait, wait_ms(state), state.clock.sleep}, state}
+        case wait_ms(state) do
+          nil ->
+            {:reply, {:error, :capacity_unavailable}, state}
+
+          ms when message == :acquire ->
+            {:reply, {:wait, ms, state.clock.sleep}, state}
+
+          ms ->
+            at = DateTime.add(ScarcityClock.utc_now(), ms, :millisecond)
+            {:reply, {:defer, at}, schedule_release(state, at)}
+        end
     end
+  end
+
+  @impl true
+  def handle_info({:simulation_wake, reference, message}, state),
+    do: NavigationClock.work(fn -> release(message, state) end, reference)
+
+  def handle_info(message, state),
+    do: NavigationParticipant.work(fn -> release(message, state) end)
+
+  defp release({:protocol_release, token}, %{release: {_, token, _}} = state),
+    do: {:noreply, refill(%{state | release: nil})}
+
+  defp release({:protocol_release, _stale}, state), do: {:noreply, state}
+
+  defp schedule_release(%{release: {_, _, at}} = state, at), do: state
+
+  defp schedule_release(state, at) do
+    if state.release, do: ScarcityClock.cancel_timer(elem(state.release, 0))
+    token = make_ref()
+    %{state | release: {ScarcityClock.send_at(self(), {:protocol_release, token}, at), token, at}}
   end
 
   defp refill(%__MODULE__{} = state) do
     now = state.clock.now.()
-    elapsed_sec = (now - state.last_refill) / 1000
+    elapsed_sec = max(now - state.last_refill, 0) / 1000
 
     %{
       state
@@ -135,5 +196,22 @@ defmodule SpaceTraders.API.RateLimiter do
     }
   end
 
-  defp wait_ms(%__MODULE__{tokens: tokens, rate: rate}), do: ceil((1 - tokens) / rate * 1000)
+  defp wait_ms(state) do
+    [
+      {state.tokens, state.rate, state.burst},
+      {state.pool_tokens, state.pool_rate, state.pool_burst}
+    ]
+    |> Enum.filter(fn {_, rate, burst} -> rate > 0 and burst >= 1 end)
+    # Round only floating-point noise, not a real fractional millisecond.
+    |> Enum.map(fn {tokens, rate, _} ->
+      max(ceil(Float.round((1 - tokens) / rate * 1000, 9)), 1)
+    end)
+    |> Enum.min(fn -> nil end)
+  end
+
+  # Keep native pacing immune to wall-clock corrections. Controlled gameplay
+  # uses the semantic clock instead; socket/DB timeouts are never routed here.
+  defp refill_now do
+    ScarcityClock.refill_ms()
+  end
 end

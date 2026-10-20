@@ -7,23 +7,27 @@ defmodule SpaceTraders.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = SpaceTraders.Simulation.NativeBootstrap.validate_runtime!()
+
     children =
-      [
-        SpaceTradersWeb.Telemetry,
-        SpaceTraders.PromEx,
-        SpaceTraders.Repo,
-        {Ecto.Migrator,
-         repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
-        SpaceTraders.FleetGeneration.Identity,
-        SpaceTraders.Outcomes,
-        {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
-        {Phoenix.PubSub, name: SpaceTraders.PubSub},
-        SpaceTraders.Evidence.ReadCoordinator,
-        SpaceTraders.API.CapacityGovernor,
-        SpaceTraders.API.ShadowAdmission,
-        SpaceTraders.EmergencyStopAdmission,
-        SpaceTraders.FleetGenerationAdmission
-      ] ++
+      SpaceTraders.Simulation.NavigationTracer.children() ++
+        [
+          SpaceTradersWeb.Telemetry,
+          SpaceTraders.PromEx,
+          SpaceTraders.Repo,
+          {Ecto.Migrator,
+           repos: Application.fetch_env!(:spacetraders, :ecto_repos), skip: skip_migrations?()},
+          SpaceTraders.FleetGeneration.Identity,
+          SpaceTraders.Outcomes,
+          {DNSCluster, query: Application.get_env(:spacetraders, :dns_cluster_query) || :ignore},
+          {Phoenix.PubSub, name: SpaceTraders.PubSub},
+          SpaceTraders.Evidence.ReadCoordinator,
+          SpaceTraders.API.CapacityGovernor,
+          SpaceTraders.API.ShadowAdmission,
+          SpaceTraders.EmergencyStopAdmission,
+          SpaceTraders.FleetGenerationAdmission
+        ] ++
+        rate_limiter_children() ++
         runtime_authority_children() ++
         fleet_reconciler_children() ++
         demand_scheduler_children() ++
@@ -35,7 +39,8 @@ defmodule SpaceTraders.Application do
           {DynamicSupervisor, strategy: :one_for_one, name: SpaceTraders.Fleet.ShipSupervisor},
           SpaceTraders.Fleet.ShipServerBoot
         ] ++
-        rate_limiter_children() ++ reset_replacement_children() ++ [SpaceTradersWeb.Endpoint]
+        reset_replacement_children() ++
+        [SpaceTradersWeb.Endpoint] ++ SpaceTraders.Simulation.NativeBootstrap.children()
 
     # See https://elixir.hexdocs.pm/Supervisor.html
     # for other strategies and supported options

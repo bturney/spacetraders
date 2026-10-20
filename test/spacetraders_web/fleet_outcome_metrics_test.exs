@@ -270,29 +270,17 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     allocation = allocation_fixture(context)
     start_worker()
     baseline()
-    parent = self()
 
-    writer =
-      Task.async(fn ->
-        Repo.transaction(fn ->
-          publish_claim(allocation)
-          send(parent, :claim_written)
+    assert {:ok, :ok} =
+             Repo.transaction(fn ->
+               publish_claim(allocation)
+               # The worker still uses its own connection. Hold the write beyond
+               # several coalescing windows without racing transaction setup.
+               refute_receive {:projection, _, _, _}, 150
+               assert_metric(:claim, "claimed", 0)
+               :ok
+             end)
 
-          receive do
-            :commit -> :ok
-          after
-            5_000 -> Repo.rollback(:writer_not_released)
-          end
-        end)
-      end)
-
-    assert_receive :claim_written
-    # Hold the write beyond several coalescing windows. Timing cannot make an
-    # early notification accidentally see committed data in this proof.
-    refute_receive {:projection, _, _, _}, 150
-    assert_metric(:claim, "claimed", 0)
-    send(writer.pid, :commit)
-    assert {:ok, :ok} = Task.await(writer)
     assert_projection(:claim, %{"claimed" => 1, "free" => 0})
     assert_metric(:claim, "claimed", 1)
   end
@@ -403,16 +391,13 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     owned_read_baseline(agent)
     before = owned_metrics()
     stub_owned_reads(agent, 80)
-    writer = held_owned_reads(agent)
 
-    assert_receive :owned_reads_retained
-
-    try do
-      assert owned_metrics() == before
-    after
-      send(writer.pid, :commit)
-      assert {:ok, {:ok, []}} = Task.await(writer)
-    end
+    assert {:ok, :ok} =
+             Repo.transaction(fn ->
+               nested_owned_reads(agent)
+               assert owned_metrics() == before
+               :ok
+             end)
 
     assert metric_value("spacetraders_outcome_agent_credits") == 80
     assert metric_value("spacetraders_outcome_agent_credits_previous") == 100
@@ -429,16 +414,13 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     owned_read_baseline(agent)
     before = owned_metrics()
     stub_owned_reads(agent, 80)
-    writer = held_owned_reads(agent)
 
-    assert_receive :owned_reads_retained
-
-    try do
-      assert owned_metrics() == before
-    after
-      send(writer.pid, :rollback)
-      assert {:error, :discard_owned_reads} = Task.await(writer)
-    end
+    assert {:error, :discard_owned_reads} =
+             Repo.transaction(fn ->
+               nested_owned_reads(agent)
+               assert owned_metrics() == before
+               Repo.rollback(:discard_owned_reads)
+             end)
 
     assert owned_metrics() == before
 
@@ -617,27 +599,12 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
     assert metric_value(~s(spacetraders_outcome_contracts{status="active"})) == 1
   end
 
-  defp held_owned_reads(agent) do
-    parent = self()
-
-    Task.async(fn ->
-      Repo.transaction(fn ->
-        assert {:ok, {:ok, []}} =
-                 Repo.transaction(fn ->
-                   assert {:ok, _} = Evidence.get_agent(agent)
-                   Evidence.get_contracts(agent)
-                 end)
-
-        send(parent, :owned_reads_retained)
-
-        receive do
-          :commit -> {:ok, []}
-          :rollback -> Repo.rollback(:discard_owned_reads)
-        after
-          5_000 -> Repo.rollback(:writer_not_released)
-        end
-      end)
-    end)
+  defp nested_owned_reads(agent) do
+    assert {:ok, {:ok, []}} =
+             Repo.transaction(fn ->
+               assert {:ok, _} = Evidence.get_agent(agent)
+               Evidence.get_contracts(agent)
+             end)
   end
 
   defp owned_metrics do

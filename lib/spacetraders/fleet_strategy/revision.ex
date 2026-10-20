@@ -12,7 +12,11 @@ defmodule SpaceTraders.FleetStrategy.Revision do
 
     belongs_to :fleet_strategy, SpaceTraders.FleetStrategy.Strategy
 
-    timestamps(type: :utc_datetime, updated_at: false)
+    timestamps(
+      type: :utc_datetime,
+      updated_at: false,
+      autogenerate: {SpaceTraders.Clock.Timestamp, :second, []}
+    )
   end
 
   def create_changeset(revision, attrs) do

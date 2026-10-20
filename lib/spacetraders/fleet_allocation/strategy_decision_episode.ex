@@ -65,7 +65,7 @@ defmodule SpaceTraders.FleetAllocation.StrategyDecisionEpisode do
     belongs_to :fleet_generation, SpaceTraders.FleetGeneration.Generation
     belongs_to :fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(type: :utc_datetime_usec, autogenerate: {SpaceTraders.Clock.Timestamp, :now, []})
   end
 
   @doc "The durable selection kinds fixed by ADR 0012."

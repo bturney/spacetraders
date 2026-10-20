@@ -16,6 +16,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
   """
 
   use GenServer
+  use SpaceTraders.Simulation.NavigationParticipant, calls: true, casts: true
   require Logger
 
   alias SpaceTraders.API.Model.{Cooldown, Ship, ShipNav}
@@ -109,8 +110,7 @@ defmodule SpaceTraders.Fleet.ShipServer do
     end
   end
 
-  @impl true
-  def init(opts) do
+  def init_participant(opts) do
     state = %{
       symbol: Keyword.fetch!(opts, :symbol),
       agent_id: Keyword.fetch!(opts, :agent_id),
@@ -126,23 +126,19 @@ defmodule SpaceTraders.Fleet.ShipServer do
     {:ok, state}
   end
 
-  @impl true
-  def handle_call(:ensure_ready, _from, state) do
+  def handle_participant_call(:ensure_ready, _from, state) do
     {:reply, ready_reply(state), state}
   end
 
-  @impl true
-  def handle_call(:cancel_pending, _from, state) do
+  def handle_participant_call(:cancel_pending, _from, state) do
     {:reply, :ok, %{state | pending: %{}}}
   end
 
-  @impl true
-  def handle_cast({:arm, %Event{} = event}, state) do
+  def handle_participant_cast({:arm, %Event{} = event}, state) do
     {:noreply, rearm(event, state)}
   end
 
-  @impl true
-  def handle_info({:timeline, %Event{} = event}, state) do
+  def handle_participant_info({:timeline, %Event{} = event}, state) do
     SpaceTraders.Observability.with_context(
       [intent_id: event.payload["intent_id"]],
       fn ->

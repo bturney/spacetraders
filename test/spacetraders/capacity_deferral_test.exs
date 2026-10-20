@@ -16,6 +16,79 @@ defmodule SpaceTraders.CapacityDeferralTest do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
 
+  test "semantic scarcity retains a sent mutation through a real governor restart and resumes recovery once" do
+    %{agent: agent, intent: intent} = transfer_fixture()
+
+    {:ok, %{intent: selected, attempt: attempt}} =
+      RecordedAction.prepare(agent, intent, prepared_action(agent))
+
+    {:ok, _} = MutationAttempts.mark_sent_or_unknown(attempt)
+
+    previous =
+      Map.new([:clock, :semantic_api_scarcity], &{&1, Application.fetch_env(:spacetraders, &1)})
+
+    now = SpaceTraders.Clock.utc_now()
+    start_supervised!({SpaceTraders.TestClock, now})
+    Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
+    Application.put_env(:spacetraders, :semantic_api_scarcity, true)
+    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, CapacityGovernor)
+    start_supervised!({CapacityGovernor, probe_base_ms: 1_000})
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:spacetraders, key, value)
+        {key, :error} -> Application.delete_env(:spacetraders, key)
+      end)
+
+      {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, CapacityGovernor)
+    end)
+
+    parent = self()
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      assert conn.method == "GET"
+      send(parent, :throttled_recovery_read)
+
+      conn
+      |> Plug.Conn.put_resp_header("retry-after", "5")
+      |> Plug.Conn.put_status(429)
+      |> Req.Test.json(%{"error" => %{"code" => 429, "message" => "rate limited"}})
+    end)
+
+    _ = Intents.advance(agent, selected, nil)
+    assert_receive :throttled_recovery_read
+    refute_received :throttled_recovery_read
+    assert_capacity_deferred(selected, attempt)
+    event = wakeup_event()
+    assert DateTime.compare(event.due_at, DateTime.add(now, 5)) == :eq
+
+    # Reconsidering during the window spends neither another read nor mutation.
+    _ = Intents.reconcile(agent.id, "PRODUCER", nil, :intent_retry, selected.id)
+    refute_received :throttled_recovery_read
+    SpaceTraders.Quiesced.stop_ship("PRODUCER")
+    event = wakeup_event()
+    stop_supervised!(CapacityGovernor)
+    Req.Test.stub(SpaceTraders.API, fn _ -> flunk("missing authority must not dispatch") end)
+    assert {:error, :capacity_unavailable} = SpaceTraders.API.get_status()
+    start_supervised!({CapacityGovernor, probe_base_ms: 1_000})
+    Intents.rearm_on_boot()
+    assert wakeup_event().id == event.id
+    assert MutationAttempts.get!(attempt.id).state == "sent_or_unknown"
+    SpaceTraders.Quiesced.stop_ship("PRODUCER")
+
+    # The original transfer landed. Reconciliation proves it from both Cargo
+    # observations, never by forwarding another mutation or replacing the owner.
+    {:ok, sends} = Elixir.Agent.start_link(fn -> 1 end)
+    stub_transfer(sends)
+    SpaceTraders.TestClock.advance(5)
+    :ok = Timeline.fire_event(event)
+    _ = Intents.reconcile(agent.id, "PRODUCER", nil, :intent_retry, selected.id)
+    assert MutationAttempts.get!(attempt.id).state == "accepted"
+    assert Elixir.Agent.get(sends, & &1) == 1
+    refute Repo.get!(Intent, selected.id).blocker
+    SpaceTraders.Quiesced.stop_ship("PRODUCER")
+  end
+
   test "a 429 on the acting Ship's recovery read defers durably and keeps the unresolved attempt" do
     %{agent: agent, intent: intent} = transfer_fixture()
 

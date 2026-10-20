@@ -25,7 +25,7 @@ defmodule SpaceTraders.FleetGeneration.Generation do
     belongs_to :fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
     belongs_to :initial_fleet_strategy_revision, SpaceTraders.FleetStrategy.Revision
 
-    timestamps(type: :utc_datetime)
+    timestamps(type: :utc_datetime, autogenerate: {SpaceTraders.Clock.Timestamp, :second, []})
   end
 
   def changeset(generation, attrs) do

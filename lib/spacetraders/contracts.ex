@@ -172,8 +172,11 @@ defmodule SpaceTraders.Contracts do
 
   defp deadline_passed?(deadline) when is_binary(deadline) do
     case DateTime.from_iso8601(deadline) do
-      {:ok, date_time, _offset} -> DateTime.compare(date_time, DateTime.utc_now()) == :lt
-      _ -> false
+      {:ok, date_time, _offset} ->
+        DateTime.compare(date_time, SpaceTraders.Clock.utc_now()) == :lt
+
+      _ ->
+        false
     end
   end
 

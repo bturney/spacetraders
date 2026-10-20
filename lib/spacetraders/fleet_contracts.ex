@@ -89,7 +89,10 @@ defmodule SpaceTraders.FleetContracts do
                  admit_acceptance(
                    revision,
                    contract,
-                   Map.merge(evidence, %{credits: overview.credits, as_of: DateTime.utc_now()})
+                   Map.merge(evidence, %{
+                     credits: overview.credits,
+                     as_of: SpaceTraders.Clock.utc_now()
+                   })
                  ),
                {:ok, result} <-
                  Agent.handle_game_result(agent, Contracts.accept_contract(agent, contract_id)) do
@@ -105,7 +108,7 @@ defmodule SpaceTraders.FleetContracts do
   end
 
   defp fresh_acceptance_evidence(%{as_of: %DateTime{} = observed_at}) do
-    if DateTime.diff(DateTime.utc_now(), observed_at, :second) in 0..300,
+    if DateTime.diff(SpaceTraders.Clock.utc_now(), observed_at, :second) in 0..300,
       do: :ok,
       else: {:error, :stale_acceptance_evidence}
   end
@@ -132,7 +135,7 @@ defmodule SpaceTraders.FleetContracts do
            StandingAuthority.authorize(revision, %{
              revision_id: revision.id,
              evidence_id: Evidence.fingerprint({contracts, ship_symbol}),
-             observed_at: DateTime.utc_now(),
+             observed_at: SpaceTraders.Clock.utc_now(),
              bounds: %{minimum_credits: overview.credits, scraps_ship: false}
            }),
          {:ok, result} <-
@@ -153,7 +156,7 @@ defmodule SpaceTraders.FleetContracts do
          :ok <- reconcile_contracts(agent, contracts),
          {:ok, ships} <- Fleet.list_ships(agent),
          {:ok, overview} <- Agent.agent_overview(agent) do
-      now = DateTime.utc_now()
+      now = SpaceTraders.Clock.utc_now()
       accepted = Enum.filter(contracts, &Contracts.active?/1)
 
       case completed_purchase_awaiting_delivery(scope, agent) do
@@ -806,7 +809,11 @@ defmodule SpaceTraders.FleetContracts do
     |> where([observation], observation.agent_id == ^agent.id)
     |> where([observation], like(observation.subject, "market:%"))
     |> where([observation], observation.observed_at <= ^as_of)
-    |> order_by([observation], desc: observation.observed_at, desc: observation.id)
+    |> order_by([observation],
+      desc: observation.observed_at,
+      desc: observation.inserted_at,
+      desc: observation.id
+    )
     |> Repo.all()
     |> Enum.uniq_by(& &1.subject)
     |> Enum.flat_map(fn observation ->
@@ -848,7 +855,7 @@ defmodule SpaceTraders.FleetContracts do
            StandingAuthority.authorize(revision, %{
              revision_id: revision.id,
              evidence_id: Evidence.fingerprint(contract),
-             observed_at: DateTime.utc_now(),
+             observed_at: SpaceTraders.Clock.utc_now(),
              bounds: %{minimum_credits: overview.credits, scraps_ship: false}
            }),
          {:ok, result} <-

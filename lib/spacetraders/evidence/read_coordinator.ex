@@ -2,6 +2,7 @@ defmodule SpaceTraders.Evidence.ReadCoordinator do
   @moduledoc "Coalesces concurrent reads for the same evidence subject."
 
   use GenServer
+  use SpaceTraders.Simulation.NavigationParticipant, calls: true, casts: true
 
   @doc "Starts the short-lived in-flight read coordinator."
   def start_link(opts \\ []) do
@@ -39,11 +40,9 @@ defmodule SpaceTraders.Evidence.ReadCoordinator do
     end
   end
 
-  @impl true
-  def init(_opts), do: {:ok, %{pending: %{}}}
+  def init_participant(_opts), do: {:ok, %{pending: %{}}}
 
-  @impl true
-  def handle_call({:begin, key}, {pid, _ref}, %{pending: pending} = state) do
+  def handle_participant_call({:begin, key}, {pid, _ref}, %{pending: pending} = state) do
     case Map.get(pending, key) do
       nil ->
         monitor_ref = Process.monitor(pid)
@@ -57,8 +56,7 @@ defmodule SpaceTraders.Evidence.ReadCoordinator do
     end
   end
 
-  @impl true
-  def handle_cast({:complete, key, result}, %{pending: pending} = state) do
+  def handle_participant_cast({:complete, key, result}, %{pending: pending} = state) do
     case Map.pop(pending, key) do
       {nil, pending} ->
         {:noreply, %{state | pending: pending}}
@@ -70,8 +68,10 @@ defmodule SpaceTraders.Evidence.ReadCoordinator do
     end
   end
 
-  @impl true
-  def handle_info({:DOWN, monitor_ref, :process, _pid, reason}, %{pending: pending} = state) do
+  def handle_participant_info(
+        {:DOWN, monitor_ref, :process, _pid, reason},
+        %{pending: pending} = state
+      ) do
     case Enum.find(pending, fn {_key, entry} -> entry.monitor_ref == monitor_ref end) do
       nil ->
         {:noreply, state}
