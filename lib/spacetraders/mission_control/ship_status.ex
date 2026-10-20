@@ -106,7 +106,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       stall: generation && stall(generation, portfolio),
       skipped: skipped_buys(ship_ids, now),
       earnings: earnings(generation, symbols, now, thresholds),
-      refreshed: if(scouting?, do: refreshed(Map.values(assignments)), else: %{}),
+      refreshed: if(scouting?, do: refreshed(ship_ids, now, thresholds.hour_seconds), else: %{}),
       overdue: if(scouting?, do: overdue_markets(agent, now), else: 0)
     }
   end
@@ -213,15 +213,17 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     |> Map.new()
   end
 
-  defp refreshed(assignments) do
-    commitment_ids = for %{coverage?: true, id: id} <- assignments, do: id
+  # Every Market refresh is its own Commitment, so a count keyed by the
+  # current assignment only ever reads 0 or 1. Count the Ship's own refreshes.
+  defp refreshed(ship_ids, now, window_seconds) do
+    since = DateTime.add(now, -window_seconds)
 
     from(i in Intent,
       where:
-        i.fleet_commitment_id in ^commitment_ids and i.type == "acquire_intelligence" and
-          i.status == "completed",
-      group_by: i.fleet_commitment_id,
-      select: {i.fleet_commitment_id, count(i.id)}
+        i.ship_id in ^ship_ids and i.type == "acquire_intelligence" and
+          i.status == "completed" and i.finished_at > ^since,
+      group_by: i.ship_id,
+      select: {i.ship_id, count(i.id)}
     )
     |> Repo.all()
     |> Map.new()
@@ -264,7 +266,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       stuck(intent, assignment, facts.stall) ||
         waiting(assignment, facts.neutral_wait) ||
         busy_not_earning(ship, facts.skipped[ship.id] || 0, earned, facts.thresholds, now) ||
-        working(assignment, intent, facts)
+        working(assignment, intent, ship, facts)
 
     base
     |> Map.merge(details)
@@ -347,21 +349,22 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     end
   end
 
-  defp working(nil, _intent, _facts),
+  defp working(nil, _intent, _ship, _facts),
     do: {:waiting, %{phrase: "Waiting for new orders"}}
 
-  defp working(%{coverage?: true, id: id}, _intent, facts) do
-    refreshed = Map.get(facts.refreshed, id, 0)
+  defp working(%{coverage?: true}, _intent, ship, facts) do
+    refreshed = Map.get(facts.refreshed, ship.id, 0)
 
     {:scouting,
      %{
        markets_refreshed: refreshed,
        markets_overdue: facts.overdue,
-       phrase: "Refreshing markets: #{refreshed} refreshed, #{facts.overdue} overdue"
+       phrase:
+         "Refreshing markets: #{refreshed} refreshed in the last hour, #{facts.overdue} overdue"
      }}
   end
 
-  defp working(assignment, intent, _facts) do
+  defp working(assignment, intent, _ship, _facts) do
     {:trading,
      %{
        estimate: assignment.expected_value && round(assignment.expected_value),
