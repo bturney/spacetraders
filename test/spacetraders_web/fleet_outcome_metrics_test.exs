@@ -97,7 +97,8 @@ defmodule SpaceTradersWeb.FleetOutcomeMetricsTest do
       "waiting" => 0,
       "stuck" => 0,
       "scouting" => 0,
-      "busy_not_earning" => 0
+      "busy_not_earning" => 0,
+      "busy_skipping_buys" => 0
     })
 
     assert_metric("trading", 1)

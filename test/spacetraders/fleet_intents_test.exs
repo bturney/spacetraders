@@ -175,7 +175,7 @@ defmodule SpaceTraders.FleetIntentsTest do
         }
     }
 
-    assert {:ok, %Intent{type: "buy", status: "infeasible", mutation_attempt_id: nil}} =
+    assert {:ok, %Intent{type: "buy", status: "infeasible", mutation_attempt_id: nil} = refused} =
              Intents.request_commitment_round_trip(
                agent,
                commitment,
@@ -183,6 +183,16 @@ defmodule SpaceTraders.FleetIntentsTest do
                ship.symbol,
                candidate
              )
+
+    # Structured price fields, not an inspected tuple to parse (#813).
+    assert %{
+             "outcome" => "infeasible",
+             "evidence" => %{
+               "reason" => "price_constraint",
+               "observed_price" => 12,
+               "max_price" => 10
+             }
+           } = refused.last_action_result
 
     assert Intents.current(agent) == []
   end
