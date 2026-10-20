@@ -1914,6 +1914,67 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert projection.facts["ships"].observing_ship_symbol == ship.symbol
   end
 
+  # Pins current behaviour for the #739 diagnosis: Ship Offer evidence, the
+  # acquisition planner's only offer source, is observed only for a Strategic
+  # Objective whose objective or evaluation text names Ships or Fleet growth.
+  # A #739 repair is expected to flip the preset rows.
+  for {label, objectives, shipyard?} <-
+        Enum.map(FleetStrategy.presets(), &{&1.id, &1.objectives, false}) ++
+          [
+            {"Ship-naming objective",
+             [%{"objective" => "Expand Fleet with a Ship", "kind" => "attain"}], true}
+          ] do
+    test "#{label} Strategy plans Ship Offer observation: #{shipyard?}" do
+      {agent, ship, previous, _commitment} = claimed_ship(hd(unquote(Macro.escape(objectives))))
+      scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
+
+      revision =
+        Repo.update!(
+          Ecto.Changeset.change(Repo.get!(Revision, previous.fleet_strategy_revision_id),
+            document: %{
+              "objectives" => unquote(Macro.escape(objectives)),
+              "hard_constraints" => ["Keep at least 1,000 credits available"]
+            }
+          )
+        )
+
+      assert {:ok, _} =
+               FleetAllocation.unwind_current_portfolio(scope, previous.fleet_generation_id)
+
+      for {symbol, traits} <- [
+            {"X1-UX81-A1", [%{"symbol" => "SHIPYARD"}, %{"symbol" => "MARKETPLACE"}]},
+            {"X1-UX81-A2", [%{"symbol" => "MARKETPLACE"}]}
+          ] do
+        {:ok, _} =
+          Intelligence.observe_waypoint(
+            agent,
+            Model.Waypoint.from_json(%{
+              "symbol" => symbol,
+              "systemSymbol" => "X1-UX81",
+              "type" => "PLANET",
+              "x" => 1,
+              "y" => 2,
+              "traits" => traits
+            }),
+            source: "get_waypoints"
+          )
+      end
+
+      stub_ships(agent, [ship])
+
+      assert {:ok, %{intelligence: planning}} =
+               FleetIntelligence.plan_contributions(agent, revision, "X1-UX81", [])
+
+      subjects =
+        for demand <- (planning && planning.observation_demands) || [], do: demand.subject
+
+      assert subjects != []
+
+      assert Enum.any?(subjects, &String.starts_with?(&1, "shipyard:")) == unquote(shipyard?),
+             inspect(subjects)
+    end
+  end
+
   test "active lower-priority commitments are not superseded by intelligence activation" do
     {agent, ship, portfolio, commitment} =
       claimed_ship(%{
