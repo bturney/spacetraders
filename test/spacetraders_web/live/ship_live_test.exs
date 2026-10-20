@@ -27,6 +27,11 @@ defmodule SpaceTradersWeb.ShipLiveTest do
     {seeded, view, html}
   end
 
+  # Visible text only: drops tags (so data-* attributes never match) and collapses whitespace.
+  defp visible_text(html) do
+    html |> String.replace(~r/<[^>]+>/, " ") |> String.replace(~r/\s+/, " ")
+  end
+
   test "requires authentication" do
     assert {:error, {:redirect, %{to: "/operators/log-in"}}} =
              live(Phoenix.ConnTest.build_conn(), ~p"/ships/SEEDED-1")
@@ -49,6 +54,58 @@ defmodule SpaceTradersWeb.ShipLiveTest do
     assert has_element?(view, "#ship-history [id^=trade-]")
     assert render(view) =~ "Trading"
 
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "an option list marks only the chosen option, with no stray text", %{conn: conn} do
+    {_seeded, view, _html} = open(conn, :healthy, "SEEDED-1")
+
+    options = view |> element("#ship-options") |> render() |> visible_text()
+    refute options =~ "false"
+    assert options =~ "Iron Ore A1→B6 · chosen"
+    refute options =~ "Fuel C37→D42 · chosen"
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "trade rows read expected vs actual, matching the card heading", %{conn: conn} do
+    {_seeded, view, _html} = open(conn, :healthy, "SEEDED-1")
+
+    history = view |> element("#ship-history") |> render() |> visible_text()
+    assert history =~ "expected vs actual"
+    assert history =~ "+1,000 vs +900"
+    refute history =~ "+900 vs +1,000"
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "a trade with no expected value still shows its actual value", %{conn: conn} do
+    seeded = ScenarioSeeds.seed(:healthy, 2)
+    operator = SpaceTraders.Repo.get!(SpaceTraders.Agent.Operator, seeded.generation.operator_id)
+
+    SpaceTraders.Repo.insert!(%SpaceTraders.Outcomes.EarningsRecord{
+      source: "test",
+      fleet_generation_id: seeded.generation.id,
+      ship_symbol: "SEEDED-1",
+      ship_type: "HAULER",
+      good: "fuel",
+      source_waypoint: "X1-UX81-A1",
+      destination_waypoint: "X1-UX81-C37",
+      units: 10,
+      revenue: 600,
+      goods_cost: 100,
+      fuel_cost: 0,
+      other_cost: 0,
+      net_earnings: 500,
+      expected_value: nil,
+      ship_seconds: 60,
+      started_at: DateTime.utc_now(),
+      finished_at: DateTime.utc_now()
+    })
+
+    {:ok, view, _html} = live(log_in_operator(conn, operator), ~p"/ships/SEEDED-1")
+
+    history = view |> element("#ship-history") |> render() |> visible_text()
+    assert history =~ "+500"
+    refute history =~ "vs +500"
     refute_received {:transport_receipt, _, _}
   end
 

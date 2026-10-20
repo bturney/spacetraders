@@ -151,7 +151,7 @@ defmodule SpaceTradersWeb.ShipLive do
             <div :for={option <- @why.options} class="text-xs" data-chosen={to_string(option.chosen?)}>
               <div class="flex justify-between gap-2">
                 <span class={option.chosen? && "font-medium"}>
-                  {trade_name(option)}{option.chosen? && " · chosen"}
+                  {trade_name(option)}{if option.chosen?, do: " · chosen"}
                 </span>
                 <span class="num">{rate(option.rate)}</span>
               </div>
@@ -176,9 +176,9 @@ defmodule SpaceTradersWeb.ShipLive do
               <div class="flex justify-between gap-2">
                 <span>{trade_name(trade)}</span>
                 <span class="num text-dim">
-                  {format_signed(trade.actual)}<span :if={trade.expected}> vs {format_signed(
-                    trade.expected
-                  )}</span>
+                  <span :if={trade.expected}>{format_signed(trade.expected)} vs </span>{format_signed(
+                    trade.actual
+                  )}
                 </span>
               </div>
               <div class="relative h-2">
