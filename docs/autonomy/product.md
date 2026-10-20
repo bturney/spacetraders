@@ -6,7 +6,7 @@ SpaceTraders is primarily an economics and resource-allocation game. Build a Fle
 
 **Autonomy:** The machine selects Ships, methods and timing. The single Operator is not asked to play manually or rescue routine stalls. The product can report that it is stuck or off plan without turning that into a request for human gameplay. See [ADR 0017](../adr/0017-nothing-needs-the-operator.md). Stopping the service is the accepted kill switch.
 
-**Economic-first direction:** A simple built-in economic-growth policy is the leading hypothesis for an enjoyable default; future variations (gate-first, charting, exploration or different risk appetites) should earn their way in through experiments. This is **not yet approval** to remove durable Strategy revisions or the currently accepted objective model. See [economic-first exploration](economic-first-exploration.md).
+**Capability before optimization:** Build useful economic, charting, construction/logistics and cooperative Fleet behaviors before running large strategy-optimization campaigns. A simple economic-growth policy remains a [hypothesis](economic-first-exploration.md), not approval to change accepted Strategy revisions. The [roadmap](roadmap.md) owns outcome gates; simulator qualification is a later optimization concern, never a prerequisite for gameplay implementation.
 
 **Multi-Ship work:** The Fleet must eventually be able to allocate two or more Ships *together* to one outcome (e.g. producer and hauler), while independent Ships keep doing useful work. A team is one selected contribution with shared dependencies, not multiple competing planners.
 
@@ -19,7 +19,7 @@ SpaceTraders is primarily an economics and resource-allocation game. Build a Fle
 - **Survives:** Reconciles unknown mutation effects without blind retries; distinguishes application restart from Server Reset; fences stale-generation authority.
 - **Plays the full game:** Makes every relevant pinned API capability autonomously reachable with evidence, recovery and useful planning, not merely an endpoint wrapper.
 - **Is intelligible:** The accepted game-first journey is **Glance → Ships → Ship + Why → answer-first Grafana → back**, with Plan Health, Earnings, estimated-versus-realized trade outcomes and a truthful next event. This comes from [#757](https://github.com/bturney/spacetraders/issues/757) and [ADR 0017](../adr/0017-nothing-needs-the-operator.md), replacing old #502/#311 intervention-centric screens.
-- **Is testable:** Controlled real-bot experiments can compare policies/code on pinned worlds with explicit limitations. A simulator rank is a conditional result until mechanics and economic fidelity warrant broader claims.
+- **Is testable:** New gameplay loops prove end-to-end behavior with deterministic tests and attributable game evidence. Accelerated actual-bot comparisons become useful once the engine has enough behaviors to optimize; simulator ranks remain model-conditional.
 
 ## Ultimate competitive destinations
 
