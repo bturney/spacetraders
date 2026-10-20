@@ -4,6 +4,8 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
 
   import SpaceTraders.ShipBody
 
+  @repo_query_event SpaceTraders.Repo.config()[:telemetry_prefix] ++ [:query]
+
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Agent.{Operator, Scope}
   alias SpaceTraders.API.Model
@@ -2996,7 +2998,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     :ok =
       :telemetry.attach(
         handler,
-        [:spacetraders, :repo, :query],
+        @repo_query_event,
         &__MODULE__.handle_event/4,
         self()
       )
@@ -3080,7 +3082,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     :ok =
       :telemetry.attach(
         handler,
-        [:spacetraders, :repo, :query],
+        @repo_query_event,
         &__MODULE__.handle_event/4,
         self()
       )
@@ -3336,7 +3338,7 @@ defmodule SpaceTraders.OwnedIntentRecoveryTest do
     {:messages, messages} = Process.info(self(), :messages)
 
     refute Enum.any?(messages, fn
-             {:telemetry, [:spacetraders, :repo, :query], _, %{query: query}} ->
+             {:telemetry, @repo_query_event, _, %{query: query}} ->
                String.contains?(query, ~s("jobs"))
 
              _ ->
