@@ -42,10 +42,14 @@ defmodule SpaceTraders.CapacityHTTPDiagnostic do
 
   setup do
     previous =
-      Map.new([:clock, API, RateLimiter], &{&1, Application.fetch_env(:spacetraders, &1)})
+      Map.new(
+        [:clock, :semantic_api_scarcity, API, RateLimiter],
+        &{&1, Application.fetch_env(:spacetraders, &1)}
+      )
 
     start_supervised!({TestClock, DateTime.utc_now()})
     Application.put_env(:spacetraders, :clock, TestClock)
+    Application.put_env(:spacetraders, :semantic_api_scarcity, true)
     operator = operator_fixture()
     agent = agent_fixture(operator)
     scope = Scope.for_operator(operator)

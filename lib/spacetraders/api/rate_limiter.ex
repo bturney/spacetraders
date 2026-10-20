@@ -28,7 +28,7 @@ defmodule SpaceTraders.API.RateLimiter do
   """
 
   use GenServer
-  alias SpaceTraders.Clock
+  alias SpaceTraders.API.ScarcityClock
   alias SpaceTraders.Simulation.{NavigationClock, NavigationParticipant}
 
   @type t :: %__MODULE__{
@@ -158,7 +158,7 @@ defmodule SpaceTraders.API.RateLimiter do
             {:reply, {:wait, ms, state.clock.sleep}, state}
 
           ms ->
-            at = DateTime.add(Clock.utc_now(), ms, :millisecond)
+            at = DateTime.add(ScarcityClock.utc_now(), ms, :millisecond)
             {:reply, {:defer, at}, schedule_release(state, at)}
         end
     end
@@ -179,9 +179,9 @@ defmodule SpaceTraders.API.RateLimiter do
   defp schedule_release(%{release: {_, _, at}} = state, at), do: state
 
   defp schedule_release(state, at) do
-    if state.release, do: Clock.cancel_timer(elem(state.release, 0))
+    if state.release, do: ScarcityClock.cancel_timer(elem(state.release, 0))
     token = make_ref()
-    %{state | release: {Clock.send_at(self(), {:protocol_release, token}, at), token, at}}
+    %{state | release: {ScarcityClock.send_at(self(), {:protocol_release, token}, at), token, at}}
   end
 
   defp refill(%__MODULE__{} = state) do
@@ -212,9 +212,6 @@ defmodule SpaceTraders.API.RateLimiter do
   # Keep native pacing immune to wall-clock corrections. Controlled gameplay
   # uses the semantic clock instead; socket/DB timeouts are never routed here.
   defp refill_now do
-    case Application.get_env(:spacetraders, :clock) do
-      nil -> System.monotonic_time(:millisecond)
-      _clock -> DateTime.to_unix(Clock.utc_now(), :millisecond)
-    end
+    ScarcityClock.refill_ms()
   end
 end

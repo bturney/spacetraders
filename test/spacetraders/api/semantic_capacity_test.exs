@@ -5,15 +5,18 @@ defmodule SpaceTraders.API.SemanticCapacityTest do
   alias SpaceTraders.API.{CapacityGovernor, OperationInventory, RateLimiter}
 
   setup do
-    previous = Application.fetch_env(:spacetraders, :clock)
+    previous =
+      Map.new([:clock, :semantic_api_scarcity], &{&1, Application.fetch_env(:spacetraders, &1)})
+
     start_supervised!({TestClock, ~U[2026-10-19 00:00:00.000000Z]})
     Application.put_env(:spacetraders, :clock, TestClock)
+    Application.put_env(:spacetraders, :semantic_api_scarcity, true)
 
     on_exit(fn ->
-      case previous do
-        {:ok, value} -> Application.put_env(:spacetraders, :clock, value)
-        :error -> Application.delete_env(:spacetraders, :clock)
-      end
+      Enum.each(previous, fn
+        {key, {:ok, value}} -> Application.put_env(:spacetraders, key, value)
+        {key, :error} -> Application.delete_env(:spacetraders, key)
+      end)
     end)
 
     :ok
