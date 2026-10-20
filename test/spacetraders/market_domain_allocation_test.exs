@@ -528,6 +528,33 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       refute_received {:game_request, "POST", "/v2/my/ships"}
     end
 
+    # #739 diagnosis: the matched counterpart of the worthwhile-offer case,
+    # varying only the Shipyard offer evidence the preset Strategies never acquire.
+    for shipyard <- [:absent, :aged] do
+      test "#{shipyard} Shipyard offer evidence refuses an otherwise eligible investment" do
+        fleet = investment_fleet(shipyard: unquote(shipyard))
+
+        stub_game(fleet.agent, [@frigate],
+          investment: true,
+          report_requests: true,
+          refuse_ship_reads: true
+        )
+
+        assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+
+        assert [refusal] =
+                 Repo.all(
+                   from e in StrategyDecisionEpisode,
+                     where: e.selection_kind == :acquisition_refused
+                 )
+
+        assert refusal.rejection_reason == "shipyard_offers_unavailable"
+        assert refusal.expectations["considered_work"] != []
+        refute_received {:game_request, "GET", "/v2/"}
+        refute_received {:game_request, "POST", "/v2/my/ships"}
+      end
+    end
+
     for {scenario, reason} <- [
           {:horizon, "unknown_generation_horizon"},
           {:value, "enabled_value_not_above_cost"},
@@ -1974,24 +2001,31 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
     body = investment_ship(ship_symbol(fleet, "PURCHASED"))
 
+    shipyard = Keyword.get(opts, :shipyard, :fresh)
+
     {:ok, _} =
-      Intelligence.observe_shipyard(
-        fleet.agent,
-        @system,
-        SpaceTraders.API.Model.Shipyard.from_json(%{
-          "symbol" => "X1-A1",
-          "modificationsFee" => 500,
-          "shipTypes" => [%{"type" => "SHIP_LIGHT_HAULER"}],
-          "ships" => [
-            Map.merge(
-              Map.take(body, ~w(frame reactor engine crew modules mounts)),
-              %{"type" => "SHIP_LIGHT_HAULER", "purchasePrice" => 1_000}
-            )
-          ]
-        }),
-        source: "get_shipyard",
-        offers_visible: true
-      )
+      if shipyard == :absent,
+        do: {:ok, nil},
+        else:
+          Intelligence.observe_shipyard(
+            fleet.agent,
+            @system,
+            SpaceTraders.API.Model.Shipyard.from_json(%{
+              "symbol" => "X1-A1",
+              "modificationsFee" => 500,
+              "shipTypes" => [%{"type" => "SHIP_LIGHT_HAULER"}],
+              "ships" => [
+                Map.merge(
+                  Map.take(body, ~w(frame reactor engine crew modules mounts)),
+                  %{"type" => "SHIP_LIGHT_HAULER", "purchasePrice" => 1_000}
+                )
+              ]
+            }),
+            source: "get_shipyard",
+            offers_visible: true,
+            observed_at:
+              DateTime.add(DateTime.utc_now(), if(shipyard == :aged, do: -301, else: 0))
+          )
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
       Req.Test.json(conn, %{
