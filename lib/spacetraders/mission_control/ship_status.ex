@@ -10,7 +10,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       (the allocation is re-checked every minute);
     * `:waiting` (Waiting on purpose) - unassigned during a Neutral Wait, with
       the wait's next check; an unassigned Ship outside a Neutral Wait waits
-      for its next job with no check time;
+      for new orders with no check time;
     * `:busy_not_earning` - with at least an hour of its own history, 3 or
       more skipped buys in 30 minutes, or last-hour Net Earnings below 40% of
       its average per hour over the last 6 h (or its whole history if younger);
@@ -348,7 +348,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   end
 
   defp working(nil, _intent, _facts),
-    do: {:waiting, %{phrase: "Waiting for its next job"}}
+    do: {:waiting, %{phrase: "Waiting for new orders"}}
 
   defp working(%{coverage?: true, id: id}, _intent, facts) do
     refreshed = Map.get(facts.refreshed, id, 0)
