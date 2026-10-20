@@ -4,15 +4,15 @@
 
 ## 1. Identify the useful outcome
 
-Inspect the **current gate's last sprint result and most binding failure**, current source/branch, accepted [ADRs](../adr/), [glossary](../../GLOSSARY.md), active PRs and outcome evidence. Name the blocked Fleet outcome, scarce resource, uncertainty and existing module owner. Prefer observable gameplay effects over a proposed abstraction.
+Inspect the **current gate's last sprint result and most important missing gameplay behavior**, current source/branch, accepted [ADRs](../adr/), [glossary](../../GLOSSARY.md), active PRs and outcome evidence. Name the blocked Fleet outcome, scarce resource, uncertainty and existing module owner. Prefer observable gameplay effects over a proposed abstraction.
 
-**Done when:** a reader can identify the failed/unproven current-gate criterion, latest receipt, concrete bottleneck, and the evidence behind that claim.
+**Done when:** a reader can identify the unproven current-gate outcome, last receipt and one observed missing behavior or clearly marked unknown.
 
 ## 2. Decide whether to specify it
 
-Compare doing nothing, simplifying/deepening current code, a small experiment and a new capability. Estimate economic value, Ship time, credits, API scarcity, uncertainty, invariants and maintenance cost. Obtain explicit Operator decisions for policy/UX direction and an ADR for architectural authority changes.
+Compare doing nothing, repairing existing behavior, a small deterministic test and a new end-to-end gameplay loop. Favor useful gameplay reach before policy optimization unless a proved failure blocks the gate. Estimate Ship time, credits, API scarcity, uncertainty, invariants and maintenance cost. Obtain explicit Operator decisions for policy/UX direction and an ADR for architectural authority changes.
 
-**Done when:** the hypothesis has a predeclared measurable success condition, evidence boundary, and risk controls against the **current gate**, or the result is *inconclusive/deferred* without speculative tickets.
+**Done when:** one proposed increment can change a **current-gate outcome**, with a predeclared end-to-end proof, evidence boundary and risk controls; otherwise record *inconclusive/deferred*.
 
 ## 3. Create the GitHub spec issue
 
@@ -38,7 +38,7 @@ Reuse the existing Fleet owner and preserve [architecture invariants](architectu
 
 Update [roadmap.md](roadmap.md) when a gate is proven, its evidence-backed status or the overarching next outcome changes; [capabilities.md](capabilities.md) when high-level delivery/proof or important gaps change; [product.md](product.md) or an ADR for broader decisions. Link the relevant issue and proof without reproducing its acceptance criteria in Markdown. Keep fine-grained ticket statuses in GitHub.
 
-**Done when:** a future agent can tell which gate is active, why it is still blocked or proven, and which last sprint evidence should determine the next **GitHub spec/tickets** without guessing a predetermined feature sequence.
+**Done when:** a future agent can identify the current gate, the latest receipt and the next behavior to investigate without mistaking simulator integration or a capability list for a prerequisite.
 
 ## Boundaries
 
