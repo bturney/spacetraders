@@ -16,6 +16,8 @@ defmodule SpaceTraders.Evidence.Observation do
 
     belongs_to :agent, SpaceTraders.Agent.Agent
 
+    # Physical retention order breaks ties between acquisitions at one frozen
+    # semantic instant. Gameplay freshness uses observed_at, never inserted_at.
     timestamps(type: :utc_datetime_usec, updated_at: false)
   end
 end

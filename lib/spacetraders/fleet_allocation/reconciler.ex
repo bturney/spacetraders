@@ -23,6 +23,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.Revision
   alias SpaceTraders.Repo
+  alias SpaceTraders.Clock
 
   @refresh_ms 60_000
 
@@ -35,8 +36,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     # Durable Evidence scheduler announcements for due Observation Demands.
     Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "observation_demands")
     send(self(), :reconcile_intelligence_on_boot)
-    SpaceTraders.Clock.send_after(self(), :reconcile_durable_work, @refresh_ms)
-    {:ok, %{}}
+    {:ok, arm_refresh()}
   end
 
   def handle_participant_info(
@@ -82,6 +82,9 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
         if system = system_for(agent) do
           send(self(), {:waypoint_intelligence_observed, agent_id, system})
+        else
+          # Contract/Construction recovery does not depend on Market location.
+          reconcile_durable_work()
         end
 
       _ ->
@@ -91,10 +94,14 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     {:noreply, state}
   end
 
-  def handle_participant_info(:reconcile_durable_work, state) do
+  def handle_participant_info(
+        {:reconcile_durable_work, token},
+        %{refresh_token: token} = state
+      )
+      when is_reference(token) do
+    Clock.cancel_timer(state.refresh_ref)
     reconcile_durable_work()
-    SpaceTraders.Clock.send_after(self(), :reconcile_durable_work, @refresh_ms)
-    {:noreply, state}
+    {:noreply, arm_refresh()}
   end
 
   def handle_participant_info({:observation_demand_due, agent_id, _subjects}, state) do
@@ -104,6 +111,12 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   end
 
   def handle_participant_info(_message, state), do: {:noreply, state}
+
+  defp arm_refresh do
+    token = make_ref()
+    reference = Clock.send_after(self(), {:reconcile_durable_work, token}, @refresh_ms)
+    %{refresh_token: token, refresh_ref: reference}
+  end
 
   @doc """
   Wakes Strategy reconciliation for a Generation whose Observation Demands came
