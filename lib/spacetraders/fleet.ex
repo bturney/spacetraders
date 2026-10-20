@@ -50,8 +50,8 @@ defmodule SpaceTraders.Fleet do
 
   @doc """
   Subscribes the caller to Intent status changes of every Ship, as
-  `{:intent_changed, ship_id}`: a prompt to re-read, never data. It may arrive
-  before the change commits, so readers re-read after a short delay.
+  `{:intent_changed, ship_id}`: a prompt to re-read, never data. It arrives
+  after the change commits.
   """
   def subscribe_intent_changes,
     do: Phoenix.PubSub.subscribe(SpaceTraders.PubSub, "intent_changes")
@@ -62,26 +62,44 @@ defmodule SpaceTraders.Fleet do
       Phoenix.PubSub.broadcast(SpaceTraders.PubSub, "intent_changes", {:intent_changed, ship_id})
 
   @doc """
-  Current Ships of an Agent with their stored state and Cargo, ordered by name.
-  Reads only the database.
+  Current Ships of an Agent with their stored state and Cargo, in natural name
+  order (`AGENT-2` before `AGENT-10`). Reads only the database.
   """
   def current_ships(agent_id) when is_integer(agent_id) do
     from(ship in Ship,
       where: ship.agent_id == ^agent_id and is_nil(ship.retired_at),
-      order_by: [asc: ship.symbol],
       preload: [:cargo]
     )
     |> Repo.all()
+    |> Enum.sort_by(&name_order(&1.symbol))
   end
 
   @doc "The given current Ships of an Agent, as `current_ships/1` reads them."
   def current_ships(agent_id, ship_ids) when is_integer(agent_id) and is_list(ship_ids) do
     from(ship in Ship,
       where: ship.agent_id == ^agent_id and is_nil(ship.retired_at) and ship.id in ^ship_ids,
-      order_by: [asc: ship.symbol],
       preload: [:cargo]
     )
     |> Repo.all()
+    |> Enum.sort_by(&name_order(&1.symbol))
+  end
+
+  @doc """
+  Sort key of a Ship symbol in natural name order. The game numbers an
+  Agent's Ships with a hexadecimal suffix (`-9`, `-A`, `-10`): order by
+  prefix, then by that number.
+  """
+  def name_order(symbol) do
+    {prefix, suffix} =
+      case symbol |> String.split("-") |> Enum.split(-1) do
+        {[], [only]} -> {"", only}
+        {parts, [last]} -> {Enum.join(parts, "-"), last}
+      end
+
+    case Integer.parse(suffix, 16) do
+      {n, ""} -> {prefix, 0, n, suffix}
+      _ -> {prefix, 1, 0, suffix}
+    end
   end
 
   @doc """
@@ -117,7 +135,7 @@ defmodule SpaceTraders.Fleet do
 
   defp ship_facts(%{} = response, path) when is_binary(path) and not is_struct(response) do
     with ["my", "ships", symbol, _action | _] <- String.split(path, "/", trim: true),
-         facts when map_size(facts) > 0 <- Map.take(response, [:nav, :fuel, :cargo]) do
+         facts when map_size(facts) > 0 <- Map.take(response, [:nav, :fuel, :cargo, :cooldown]) do
       [{symbol, facts}]
     else
       _ -> []
@@ -128,7 +146,7 @@ defmodule SpaceTraders.Fleet do
 
   @doc """
   The one upsert of a registered Ship's current state from game facts (any of
-  `:nav`, `:fuel`, `:cargo`, `:engine`, `:frame`). Absent facts keep their last
+  `:nav`, `:fuel`, `:cargo`, `:cooldown`, `:engine`, `:frame`). Absent facts keep their last
   observed value; Cargo is replaced as a set. Unregistered Ships are ignored:
   registration stays with authoritative acquisition. Broadcasts the stored Ship.
   """
@@ -174,7 +192,8 @@ defmodule SpaceTraders.Fleet do
       frame_changes(Map.get(facts, :frame)),
       fuel_changes(Map.get(facts, :fuel)),
       cargo_capacity_changes(Map.get(facts, :cargo)),
-      nav_changes(Map.get(facts, :nav))
+      nav_changes(Map.get(facts, :nav)),
+      cooldown_changes(Map.get(facts, :cooldown))
     ]
     |> Enum.reduce(%{}, &Map.merge(&2, &1))
   end
@@ -213,6 +232,15 @@ defmodule SpaceTraders.Fleet do
   end
 
   defp nav_changes(_), do: %{}
+
+  defp cooldown_changes(%{remaining_seconds: seconds, expiration: expiration})
+       when is_integer(seconds) and seconds > 0,
+       do: %{cooldown_expires_at: route_time(expiration)}
+
+  defp cooldown_changes(%{remaining_seconds: seconds}) when is_integer(seconds),
+    do: %{cooldown_expires_at: nil}
+
+  defp cooldown_changes(_), do: %{}
 
   defp route_waypoint(%{symbol: symbol}), do: symbol
   defp route_waypoint(_), do: nil

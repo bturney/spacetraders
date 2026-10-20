@@ -62,6 +62,13 @@ defmodule SpaceTradersWeb.GrafanaLinkTest do
            }
   end
 
+  test "links to the player Money and Fleet dashboards" do
+    assert URI.parse(GrafanaLink.url(:money, from: "now-6h", to: :now)).path ==
+             "/d/spacetraders-money/money"
+
+    assert URI.parse(GrafanaLink.url(:fleet, [])).path == "/d/spacetraders-fleet/fleet"
+  end
+
   test "omits a Ship scope that is nil" do
     query =
       :strategy_outcomes

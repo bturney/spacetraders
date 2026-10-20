@@ -24,7 +24,7 @@ defmodule SpaceTraders.MissionControl.ShipWhyTest do
     test "names the trade it chose, its estimate after fuel, duration, rate and price age", %{
       why: why
     } do
-      assert why.status.status == :trading
+      assert why.status.kind == :trading
 
       assert %{
                good: "IRON_ORE",
@@ -64,7 +64,7 @@ defmodule SpaceTraders.MissionControl.ShipWhyTest do
     seeded = ScenarioSeeds.seed(:waiting, 2)
     why = why(seeded, "SEEDED-1")
 
-    assert why.status.status == :waiting
+    assert why.status.kind == :waiting
     assert why.choice == nil
 
     assert %{good: "COPPER_ORE", net_credits: 55, rate: 150} = why.wait.best
@@ -76,7 +76,7 @@ defmodule SpaceTraders.MissionControl.ShipWhyTest do
     seeded = ScenarioSeeds.seed(:stuck, 2)
     why = why(seeded, "SEEDED-1")
 
-    assert why.status.status == :stuck
+    assert why.status.kind == :stuck
     assert why.status.reason == "Not enough credits above the floor."
     assert why.status.retries == 2
     assert %DateTime{} = why.status.next_attempt_at

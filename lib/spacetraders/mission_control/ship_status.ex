@@ -10,7 +10,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       (the allocation is re-checked every minute);
     * `:waiting` (Waiting on purpose) - unassigned during a Neutral Wait, with
       the wait's next check; an unassigned Ship outside a Neutral Wait waits
-      for the next allocation with no check time;
+      for new orders with no check time;
     * `:busy_not_earning` - with at least an hour of its own history, 3 or
       more skipped buys in 30 minutes, or last-hour Net Earnings below 40% of
       its average per hour over the last 6 h (or its whole history if younger);
@@ -33,64 +33,79 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.Evidence.ObservationDemand
+  alias SpaceTraders.MissionControl.{PlanHealth, ShipRow}
   alias SpaceTraders.Outcomes.EarningsRecord
   alias SpaceTraders.Repo
 
   @statuses [:trading, :scouting, :waiting, :stuck, :busy_not_earning]
 
   # Prototype thresholds (spec #757); tuning them does not change the rules.
+  # The earning ratio and its windows are Plan Health's (`PlanHealth.thresholds/0`).
   @history_seconds 3600
   @skipped_buy_window_seconds 30 * 60
   @skipped_buys 3
-  @average_window_seconds 6 * 3600
-  @last_hour_seconds 3600
-  @earning_ratio 0.4
 
   @stall_reasons %{
-    stale_revision_portfolio: "Allocation stalled: work belongs to an older Strategy revision",
-    authority_blocked_intent: "Allocation stalled: a step lost its authority to act",
+    stale_revision_portfolio: "Fleet planning stalled: its trades follow an old plan",
+    authority_blocked_intent: "Fleet planning stalled: a Ship may no longer act on its step",
     overdue_demands_without_coverage:
-      "Allocation stalled: markets are overdue and nobody refreshes them"
+      "Fleet planning stalled: markets are overdue and nobody refreshes them"
   }
 
   @doc "The five statuses, in display order."
   def statuses, do: @statuses
 
+  @doc "Number of Ships of each status (every status present, zero or more)."
+  def counts(statuses) do
+    Enum.reduce(statuses, Map.new(@statuses, &{&1, 0}), fn %{kind: kind}, acc ->
+      Map.update!(acc, kind, &(&1 + 1))
+    end)
+  end
+
   @doc "Plain wording of an allocation stall reason."
-  def stall_reason(reason), do: Map.get(@stall_reasons, reason, "Allocation stalled")
+  def stall_reason(reason), do: Map.get(@stall_reasons, reason, "Fleet planning stalled")
 
   @doc "Metric label value of a status."
   def metric_label(status), do: Atom.to_string(status)
 
   @doc """
   Status of each given Ship of the Agent as of `now`, keyed by Ship id.
+  Pass `portfolio:` when the current Portfolio is already read.
   """
-  def for_ships(%AgentRecord{} = agent, ships, %DateTime{} = now) when is_list(ships) do
+  def for_ships(%AgentRecord{} = agent, ships, %DateTime{} = now, opts \\ [])
+      when is_list(ships) do
     if ships == [] do
       %{}
     else
-      facts = facts(agent, ships, now)
+      facts = facts(agent, ships, now, opts)
       Map.new(ships, &{&1.id, status(&1, facts, now)})
     end
   end
 
   ## Facts
 
-  defp facts(agent, ships, now) do
+  defp facts(agent, ships, now, opts) do
     generation = FleetAllocation.active_generation(agent)
-    portfolio = generation && FleetAllocation.current_portfolio()
+
+    portfolio =
+      generation && Keyword.get_lazy(opts, :portfolio, &FleetAllocation.current_portfolio/0)
+
     assignments = assignments(portfolio)
     ship_ids = Enum.map(ships, & &1.id)
     symbols = Enum.map(ships, & &1.symbol)
     scouting? = Enum.any?(symbols, &match?(%{coverage?: true}, assignments[&1]))
 
+    thresholds =
+      Map.take(PlanHealth.thresholds(), ~w(earning_ratio hour_seconds average_window_seconds)a)
+
     %{
+      thresholds: thresholds,
       assignments: assignments,
       intents: intents(ship_ids),
       neutral_wait: generation && neutral_wait(generation),
       stall: generation && stall(generation, portfolio),
       skipped: skipped_buys(ship_ids, now),
-      earnings: earnings(generation, symbols, now),
+      earnings: earnings(generation, symbols, now, thresholds),
       refreshed: if(scouting?, do: refreshed(Map.values(assignments)), else: %{}),
       overdue: if(scouting?, do: overdue_markets(agent, now), else: 0)
     }
@@ -168,11 +183,11 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     |> Map.new()
   end
 
-  defp earnings(nil, _symbols, _now), do: %{}
+  defp earnings(nil, _symbols, _now, _thresholds), do: %{}
 
-  defp earnings(%Generation{id: generation_id}, symbols, now) do
-    last_hour = DateTime.add(now, -@last_hour_seconds)
-    window = DateTime.add(now, -@average_window_seconds)
+  defp earnings(%Generation{id: generation_id}, symbols, now, thresholds) do
+    last_hour = DateTime.add(now, -thresholds.hour_seconds)
+    window = DateTime.add(now, -thresholds.average_window_seconds)
 
     from(r in EarningsRecord,
       where: r.fleet_generation_id == ^generation_id and r.ship_symbol in ^symbols,
@@ -234,6 +249,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     base = %{
       ship_id: ship.id,
       credits_per_hour: rate(earned),
+      # An execution step is running (not blocked): the Ship acts at once.
+      acting?: match?(%Intent{}, intent) and intent.status != "blocked",
       reason: nil,
       retries: nil,
       next_attempt_at: nil,
@@ -246,12 +263,12 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     {status, details} =
       stuck(intent, assignment, facts.stall) ||
         waiting(assignment, facts.neutral_wait) ||
-        busy_not_earning(ship, facts.skipped[ship.id] || 0, earned, now) ||
+        busy_not_earning(ship, facts.skipped[ship.id] || 0, earned, facts.thresholds, now) ||
         working(assignment, intent, facts)
 
     base
     |> Map.merge(details)
-    |> Map.put(:status, status)
+    |> Map.put(:kind, status)
   end
 
   defp stuck(%Intent{status: "blocked"} = intent, _assignment, _stall) do
@@ -298,7 +315,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
   defp waiting(_assignment, _wait), do: nil
 
-  defp busy_not_earning(ship, skipped, earned, now) do
+  defp busy_not_earning(ship, skipped, earned, thresholds, now) do
+    %{earning_ratio: ratio, hour_seconds: hour, average_window_seconds: window} = thresholds
     history = DateTime.diff(now, ship.inserted_at)
 
     cond do
@@ -309,8 +327,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
         {:busy_not_earning, %{phrase: "#{skipped} skipped buys in 30 min"}}
 
       true ->
-        hours = min(history, @average_window_seconds) / 3600
-        since = DateTime.to_unix(now) - min(history, @average_window_seconds)
+        hours = min(history, window) / hour
+        since = DateTime.to_unix(now) - min(history, window)
 
         window_net =
           for [at, net] <- earned[:records] || [], at >= since, reduce: 0, do: (sum -> sum + net)
@@ -318,7 +336,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
         average = window_net / hours
         last_hour = earned[:last_hour] || 0
 
-        if last_hour < @earning_ratio * average do
+        if last_hour < ratio * average do
           {:busy_not_earning,
            %{
              phrase:
@@ -330,7 +348,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   end
 
   defp working(nil, _intent, _facts),
-    do: {:waiting, %{phrase: "Waiting for the next allocation"}}
+    do: {:waiting, %{phrase: "Waiting for new orders"}}
 
   defp working(%{coverage?: true, id: id}, _intent, facts) do
     refreshed = Map.get(facts.refreshed, id, 0)
@@ -352,13 +370,15 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   end
 
   defp leg(%Intent{type: "buy"} = intent),
-    do: "Buying #{intent.parameters["trade_symbol"]} at #{short(intent.target_waypoint)}"
+    do:
+      "Buying #{intent.parameters["trade_symbol"]} at #{ShipRow.waypoint_code(intent.target_waypoint)}"
 
   defp leg(%Intent{type: "sell"} = intent),
-    do: "Selling #{intent.parameters["trade_symbol"]} at #{short(intent.target_waypoint)}"
+    do:
+      "Selling #{intent.parameters["trade_symbol"]} at #{ShipRow.waypoint_code(intent.target_waypoint)}"
 
   defp leg(%Intent{target_waypoint: target}) when is_binary(target),
-    do: "Flying to #{short(target)}"
+    do: "Flying to #{ShipRow.waypoint_code(target)}"
 
   defp leg(_intent), do: "Starting a trade"
 
@@ -381,6 +401,4 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     |> String.replace(~r/(\d{3})(?=\d)/, "\\1,")
     |> String.reverse()
   end
-
-  defp short(symbol), do: symbol |> String.split("-") |> List.last()
 end

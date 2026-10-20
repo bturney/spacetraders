@@ -36,7 +36,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
   test "a Ship working a trade is Trading, with what it is doing and the expected value", ctx do
     status = status(ctx)
 
-    assert status.status == :trading
+    assert status.kind == :trading
     assert status.phrase == "Buying IRON_ORE at #{short(ctx.agent.headquarters)}"
     assert status.estimate == 10
   end
@@ -46,7 +46,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     |> Ecto.Changeset.change(type: "sell", target_waypoint: "X1-UX81-C3")
     |> Repo.update!()
 
-    assert %{status: :trading, phrase: "Selling IRON_ORE at C3"} = status(ctx)
+    assert %{kind: :trading, phrase: "Selling IRON_ORE at C3"} = status(ctx)
   end
 
   test "a Ship on Market refresh is Scouting, with markets refreshed and overdue", ctx do
@@ -65,7 +65,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     overdue_demands(ctx, 3)
 
     status = status(ctx)
-    assert status.status == :scouting
+    assert status.kind == :scouting
     assert status.markets_refreshed == 2
     assert status.markets_overdue == 3
     assert status.phrase == "Refreshing markets: 2 refreshed, 3 overdue"
@@ -77,7 +77,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     neutral_wait(ctx, next)
 
     status = status(ctx)
-    assert status.status == :waiting
+    assert status.kind == :waiting
     assert status.next_check_at == next
     assert status.phrase == "Waiting for better trades; next check"
   end
@@ -94,7 +94,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     |> Repo.update!()
 
     status = status(ctx)
-    assert status.status == :stuck
+    assert status.kind == :stuck
     assert status.reason == "Not enough credits above the floor."
     assert status.retries == 2
     assert status.next_attempt_at == next
@@ -106,8 +106,8 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     ])
 
     status = status(ctx)
-    assert status.status == :stuck
-    assert status.reason == "Allocation stalled: a step lost its authority to act"
+    assert status.kind == :stuck
+    assert status.reason == "Fleet planning stalled: a Ship may no longer act on its step"
     assert status.next_attempt_at == nil
     assert status.phrase =~ "checks every minute"
   end
@@ -117,8 +117,8 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     stall_episode(ctx, :overdue_demands_without_coverage, [], stalled_portfolio_id: nil)
 
     assert %{
-             status: :stuck,
-             reason: "Allocation stalled: markets are overdue and nobody refreshes them"
+             kind: :stuck,
+             reason: "Fleet planning stalled: markets are overdue and nobody refreshes them"
            } =
              status(ctx)
   end
@@ -129,7 +129,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     skipped_buys(ctx, 3, 20 * 60)
 
     status = status(ctx)
-    assert status.status == :busy_not_earning
+    assert status.kind == :busy_not_earning
     assert status.phrase == "3 skipped buys in 30 min"
   end
 
@@ -138,7 +138,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     skipped_buys(ctx, 2, 10 * 60)
     skipped_buys(ctx, 1, 40 * 60)
 
-    assert %{status: :trading} = status(ctx)
+    assert %{kind: :trading} = status(ctx)
   end
 
   test "last-hour Net Earnings below 40% of the 6 h average is Busy not earning", ctx do
@@ -148,7 +148,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     earnings(ctx, 300, 30 * 60)
 
     status = status(ctx)
-    assert status.status == :busy_not_earning
+    assert status.kind == :busy_not_earning
     assert status.phrase == "Last hour 300 vs 1,000/h over 6 h"
   end
 
@@ -157,7 +157,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     earnings(ctx, 3_600, 3 * 3600)
     earnings(ctx, 2_400, 30 * 60)
 
-    assert %{status: :trading} = status(ctx)
+    assert %{kind: :trading} = status(ctx)
   end
 
   test "a Ship with less than an hour of its own history is never Busy not earning", ctx do
@@ -165,7 +165,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     skipped_buys(ctx, 4, 5 * 60)
     earnings(ctx, -500, 10 * 60)
 
-    assert %{status: :trading} = status(ctx)
+    assert %{kind: :trading} = status(ctx)
   end
 
   test "a young Ship averages over its own history, not a full 6 h", ctx do
@@ -173,7 +173,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     aged(ctx, 2 * 3600)
     earnings(ctx, 2_000, 90 * 60)
 
-    assert %{status: :busy_not_earning, phrase: "Last hour 0 vs 1,000/h over 2 h"} = status(ctx)
+    assert %{kind: :busy_not_earning, phrase: "Last hour 0 vs 1,000/h over 2 h"} = status(ctx)
   end
 
   test "credits per Ship-hour come from the Ship's own Earnings records", ctx do
@@ -202,7 +202,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
 
       :telemetry.attach(
         handler,
-        [:spacetraders, :repo, :query],
+        SpaceTraders.Repo.config()[:telemetry_prefix] ++ [:query],
         fn _, _, _, _ ->
           send(parent, {ref, :query})
         end,

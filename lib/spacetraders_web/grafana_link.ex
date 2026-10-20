@@ -2,6 +2,8 @@ defmodule SpaceTradersWeb.GrafanaLink do
   @moduledoc "Credential-free links into the provisioned SpaceTraders Grafana families."
 
   @dashboards %{
+    money: {"spacetraders-money", "money"},
+    fleet: {"spacetraders-fleet", "fleet"},
     strategy_outcomes: {"spacetraders-strategy-outcomes", "strategy-outcomes"},
     economics_capital: {"spacetraders-economics-capital", "economics-capital"},
     fleet_logistics: {"spacetraders-fleet-logistics", "fleet-logistics"},

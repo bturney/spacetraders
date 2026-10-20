@@ -2,10 +2,12 @@ defmodule SpaceTraders.MissionControl.ShipRow do
   @moduledoc """
   One Ships-list row read from stored Ship state; never calls the game.
 
-  A row is overdue when it is 5 minutes past the Ship's next known event:
-  arrival for a Ship in transit; for a stationary Ship, its blocked step's
-  next attempt or its Neutral Wait's next check when later than the
-  observation, else the observation itself (an action follows at once).
+  A row is overdue when it is 5 minutes past the Ship's next expected event:
+  arrival for a Ship in transit; for a stationary Ship the latest of its
+  blocked step's next attempt, its Neutral Wait's next check, and, while an
+  action is running, its observation (the action follows at once) or the end
+  of a cooldown running when observed. A Ship expecting none of these is
+  never overdue.
 
   The row carries the Ship's status from `MissionControl.ShipStatus`.
   """
@@ -29,9 +31,9 @@ defmodule SpaceTraders.MissionControl.ShipRow do
       status: status,
       location: location(ship),
       in_transit?: in_transit?,
-      from: short(ship.route_origin),
-      to: short(ship.route_destination),
-      at: if(!in_transit?, do: short(ship.waypoint_symbol)),
+      from: waypoint_code(ship.route_origin),
+      to: waypoint_code(ship.route_destination),
+      at: if(!in_transit?, do: waypoint_code(ship.waypoint_symbol)),
       depart_at: ship.route_departed_at,
       arrive_at: if(in_transit?, do: ship.route_arrives_at),
       fuel: {ship.fuel_current, ship.fuel_capacity},
@@ -58,23 +60,35 @@ defmodule SpaceTraders.MissionControl.ShipRow do
        ),
        do: arrives
 
-  defp next_event_at(%Ship{state_observed_at: observed}, status) do
-    [observed, status[:next_attempt_at], status[:next_check_at]]
+  defp next_event_at(%Ship{state_observed_at: observed} = ship, status) do
+    acting =
+      if status[:acting?] do
+        [observed, cooldown_end(ship.cooldown_expires_at, observed)]
+      else
+        []
+      end
+
+    [status[:next_attempt_at], status[:next_check_at] | acting]
     |> Enum.filter(&match?(%DateTime{}, &1))
-    |> Enum.max(DateTime)
+    |> Enum.max(DateTime, fn -> nil end)
   end
+
+  defp cooldown_end(%DateTime{} = ends, observed),
+    do: if(DateTime.compare(ends, observed) == :gt, do: ends)
+
+  defp cooldown_end(_ends, _observed), do: nil
 
   defp overdue?(nil, _now), do: false
   defp overdue?(overdue_at, now), do: DateTime.compare(now, overdue_at) != :lt
 
   defp location(%Ship{nav_status: "IN_TRANSIT"} = ship),
-    do: "In transit to #{short(ship.route_destination)}"
+    do: "In transit to #{waypoint_code(ship.route_destination)}"
 
   defp location(%Ship{nav_status: "DOCKED"} = ship),
-    do: "Docked at #{short(ship.waypoint_symbol)}"
+    do: "Docked at #{waypoint_code(ship.waypoint_symbol)}"
 
   defp location(%Ship{nav_status: "IN_ORBIT"} = ship),
-    do: "In orbit at #{short(ship.waypoint_symbol)}"
+    do: "In orbit at #{waypoint_code(ship.waypoint_symbol)}"
 
   defp location(_ship), do: "Not yet observed"
 
@@ -83,7 +97,10 @@ defmodule SpaceTraders.MissionControl.ShipRow do
 
   defp cargo(_ship), do: []
 
-  # Waypoints within the headquarters System read by their last segment.
-  defp short(nil), do: nil
-  defp short(symbol), do: symbol |> String.split("-") |> List.last()
+  @doc """
+  A waypoint's code within the headquarters System: the last segment of its
+  symbol (`X1-UX81-B7` -> `B7`); nil stays nil.
+  """
+  def waypoint_code(nil), do: nil
+  def waypoint_code(symbol) when is_binary(symbol), do: symbol |> String.split("-") |> List.last()
 end

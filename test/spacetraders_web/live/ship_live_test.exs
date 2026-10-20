@@ -95,6 +95,18 @@ defmodule SpaceTradersWeb.ShipLiveTest do
     refute_received {:transport_receipt, _, _}
   end
 
+  test "links to its Ship's Strategy Outcomes over the last 6 h", %{conn: conn} do
+    {_seeded, view, _html} = open(conn, :healthy, "SEEDED-1")
+
+    [_, href] = Regex.run(~r/href="([^"]+)"/, view |> element("#ship-grafana") |> render())
+    uri = href |> String.replace("&amp;", "&") |> URI.parse()
+
+    assert uri.path == "/d/spacetraders-strategy-outcomes/strategy-outcomes"
+
+    assert %{"var-ship" => "SEEDED-1", "from" => "now-6h", "to" => "now"} =
+             URI.decode_query(uri.query)
+  end
+
   test "an unknown Ship says so", %{conn: conn} do
     {_seeded, view, _html} = open(conn, :healthy, "NOPE-9")
     assert has_element?(view, "#ship-missing", "NOPE-9")

@@ -257,7 +257,7 @@ defmodule SpaceTradersWeb.ShipsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/ships")
 
     assert has_element?(view, "#ships-#{earning.id} [data-status=waiting]", "Waiting on purpose")
-    assert has_element?(view, "#ships-#{earning.id}", "Waiting for the next allocation")
+    assert has_element?(view, "#ships-#{earning.id}", "Waiting for new orders")
     assert has_element?(view, "#ships-#{earning.id}", "3,000/h")
 
     assert has_element?(view, "#ships-#{stuck.id} [data-status=stuck]", "Stuck")

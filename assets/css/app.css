@@ -1,7 +1,6 @@
 /* See the Tailwind configuration guide for advanced usage
    https://tailwindcss.com/docs/configuration */
 
-@import url("https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap");
 @import "tailwindcss" source(none);
 @import "phoenix-colocated/spacetraders/colocated.css";
 @source "../css";
@@ -13,6 +12,39 @@
 /* A Tailwind plugin that makes "hero-#{ICON}" classes available.
    The heroicons installation itself is managed by your mix.exs */
 @plugin "../vendor/heroicons";
+
+/* Self-hosted design-system fonts (Latin subset, SIL OFL), served from
+   priv/static/fonts: no request leaves the deployment. */
+@font-face {
+  font-family: "Barlow";
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/barlow-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Barlow";
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/barlow-latin-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Barlow";
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/barlow-latin-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Barlow";
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/barlow-latin-700.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-weight: 400 600;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-latin-variable.woff2") format("woff2");
+}
 
 /* daisyUI Tailwind Plugin. */
 @plugin "daisyui/packages/bundle/daisyui" {

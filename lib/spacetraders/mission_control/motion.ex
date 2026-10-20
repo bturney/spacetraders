@@ -23,19 +23,22 @@ defmodule SpaceTraders.MissionControl.Motion do
   @doc "`%{mode: :cards | :grid, rows, counts, not_earning}` for the Agent's current Ships."
   def read(%AgentRecord{} = agent, %DateTime{} = now) do
     ships = Fleet.current_ships(agent.id)
-    statuses = ShipStatus.for_ships(agent, ships, now)
+    build(ships, ShipStatus.for_ships(agent, ships, now), now)
+  end
+
+  @doc "The same, from already-read Ships and their statuses (keyed by Ship id)."
+  def build(ships, statuses, %DateTime{} = now) do
     rows = Enum.map(ships, &ShipRow.build(&1, statuses[&1.id], now))
+    summary(rows)
+  end
 
-    base = Map.new(ShipStatus.statuses(), &{&1, 0})
-
-    counts =
-      Enum.reduce(rows, base, fn row, acc -> Map.update!(acc, row.status.status, &(&1 + 1)) end)
-
+  @doc "Mode, counts and Not earning rows of the given rows."
+  def summary(rows) do
     %{
       mode: if(length(rows) <= @cards_up_to, do: :cards, else: :grid),
       rows: rows,
-      counts: counts,
-      not_earning: Enum.filter(rows, &(&1.status.status in @not_earning))
+      counts: ShipStatus.counts(Enum.map(rows, & &1.status)),
+      not_earning: Enum.filter(rows, &(&1.status.kind in @not_earning))
     }
   end
 end

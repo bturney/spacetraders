@@ -39,7 +39,8 @@ defmodule SpaceTraders.MissionControl.Credits do
     end
   end
 
-  defp build(agent, generation, now) do
+  @doc "Credits facts of an already-read current Agent and Generation as of `now`."
+  def build(agent, generation, now) do
     series = series(agent, generation, now)
     balance = latest(agent, generation) || generation.last_observed_credits
 

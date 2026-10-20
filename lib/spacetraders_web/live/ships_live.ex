@@ -12,32 +12,14 @@ defmodule SpaceTradersWeb.ShipsLive do
 
   use SpaceTradersWeb, :live_view
 
-  alias SpaceTraders.{Clock, Fleet, FleetGeneration}
-  alias SpaceTraders.MissionControl.{Channels, ShipRow, ShipStatus}
-
-  @refresh_ms 1_000
-  @chips %{
-    trading: :trading,
-    scouting: :scouting,
-    waiting: :waiting,
-    stuck: :stuck,
-    busy_not_earning: :busy
-  }
+  alias SpaceTraders.{Clock, Fleet}
+  alias SpaceTraders.MissionControl.{ShipRow, ShipStatus}
+  alias SpaceTradersWeb.FleetLive
 
   @impl true
   def mount(_params, _session, socket) do
-    agent =
-      case FleetGeneration.current_fleet(socket.assigns.current_scope) do
-        {:ok, %{state: :current, agent: agent}} -> agent
-        _ -> nil
-      end
-
-    if agent && connected?(socket) do
-      Fleet.subscribe_ship_state(agent.id)
-      Fleet.subscribe_intent_changes()
-      Channels.subscribe_earnings()
-      Channels.subscribe_allocation()
-    end
+    agent = FleetLive.current_agent(socket.assigns.current_scope)
+    if connected?(socket), do: FleetLive.subscribe(agent)
 
     socket
     |> assign(agent: agent, filter: nil, timer: nil, refresh: nil, statuses: %{}, pending: %{})
@@ -98,13 +80,8 @@ defmodule SpaceTradersWeb.ShipsLive do
   # Intent, allocation and Earnings prompts: re-read statuses once, shortly.
   def handle_info(_prompt, %{assigns: %{agent: nil}} = socket), do: {:noreply, socket}
 
-  def handle_info(_prompt, %{assigns: %{refresh: ref}} = socket) when ref != nil,
-    do: {:noreply, socket}
-
   def handle_info(_prompt, socket),
-    do:
-      {:noreply,
-       assign(socket, refresh: Process.send_after(self(), :refresh_statuses, @refresh_ms))}
+    do: {:noreply, FleetLive.mark_dirty(socket, :refresh_statuses)}
 
   defp load(%{assigns: %{agent: nil}} = socket),
     do: socket |> assign(counts: counts(%{})) |> stream(:ships, [], reset: true)
@@ -130,7 +107,7 @@ defmodule SpaceTradersWeb.ShipsLive do
       socket.assigns.filter &&
         Enum.any?(rows, fn row ->
           old = socket.assigns.statuses[row.id]
-          (old && old.status) != row.status.status
+          (old && old.kind) != row.status.kind
         end)
 
     socket = assign(socket, statuses: statuses, counts: counts(statuses))
@@ -149,12 +126,9 @@ defmodule SpaceTradersWeb.ShipsLive do
   end
 
   defp shown?(%{assigns: %{filter: nil}}, _row), do: true
-  defp shown?(%{assigns: %{filter: filter}}, row), do: row.status.status == filter
+  defp shown?(%{assigns: %{filter: filter}}, row), do: row.status.kind == filter
 
-  defp counts(statuses) do
-    base = Map.new(ShipStatus.statuses(), &{&1, 0})
-    Enum.reduce(statuses, base, fn {_id, %{status: s}}, acc -> Map.update!(acc, s, &(&1 + 1)) end)
-  end
+  defp counts(statuses), do: ShipStatus.counts(Map.values(statuses))
 
   # Rows not yet overdue, by the moment they become so.
   defp pending(rows), do: Enum.reduce(rows, %{}, &track(&2, &1))
@@ -214,7 +188,7 @@ defmodule SpaceTradersWeb.ShipsLive do
           class={["rounded-full", @filter == status && "ring-1 ring-base-content/40"]}
           aria-pressed={to_string(@filter == status)}
         >
-          <.status_chip status={chip(status)} small />
+          <.status_chip status={chip_status(status)} small />
           <span class="num text-xs">{@counts[status]}</span>
         </button>
       </div>
@@ -225,7 +199,7 @@ defmodule SpaceTradersWeb.ShipsLive do
             <div class="min-w-0">
               <div class="flex items-center gap-2">
                 <.link navigate={~p"/ships/#{row.symbol}"} class="font-medium">{row.symbol}</.link>
-                <.status_chip status={chip(row.status.status)} small />
+                <.status_chip status={chip_status(row.status.kind)} small />
               </div>
               <div class="text-xs">{row.status.phrase}{retry(row.status)}{estimate(row.status)}</div>
               <div class="text-xs text-dim">
@@ -236,8 +210,8 @@ defmodule SpaceTradersWeb.ShipsLive do
             </div>
             <.countdown
               id={"countdown-#{row.id}"}
-              until={until(row)}
-              caption={caption(row)}
+              until={count_until(row)}
+              caption={count_caption(row)}
               size={18}
             />
           </div>
@@ -249,7 +223,7 @@ defmodule SpaceTradersWeb.ShipsLive do
               at={row.at}
               depart_at={row.depart_at}
               arrive_at={row.arrive_at}
-              status={chip(row.status.status)}
+              status={chip_status(row.status.kind)}
               size={:sm}
             />
           </div>
@@ -264,19 +238,7 @@ defmodule SpaceTradersWeb.ShipsLive do
     """
   end
 
-  defp chip(status), do: Map.fetch!(@chips, status)
-
-  defp until(%{in_transit?: true, arrive_at: at}), do: at
-  defp until(%{status: %{next_attempt_at: %DateTime{} = at}}), do: at
-  defp until(%{status: %{next_check_at: %DateTime{} = at}}), do: at
-  defp until(_row), do: nil
-
-  defp caption(%{in_transit?: true}), do: "to arrival"
-  defp caption(%{status: %{next_attempt_at: %DateTime{}}}), do: "next attempt"
-  defp caption(%{status: %{next_check_at: %DateTime{}}}), do: "next check"
-  defp caption(_row), do: nil
-
-  defp retry(%{status: :stuck, retries: retries}) when is_integer(retries),
+  defp retry(%{kind: :stuck, retries: retries}) when is_integer(retries),
     do: " · retry #{retries}"
 
   defp retry(_status), do: nil

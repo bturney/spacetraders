@@ -17,7 +17,8 @@ defmodule SpaceTraders.ScenarioSeeds do
       row is marked as old (status stays Trading).
 
   Values are shaped like Generation 5 (Ship types, speeds, waypoints, earnings
-  per trade); nothing is copied from the snapshot. Seeding replaces the
+  per trade); nothing is copied from the snapshot. The seeded Agent has no
+  game credential, so the runtime never runs it. Seeding replaces the
   previous seed.
 
   Run it with `mix spacetraders.seed <situation> --ships 2|120`; the seeded
@@ -81,9 +82,16 @@ defmodule SpaceTraders.ScenarioSeeds do
     Map.new(ships, &{&1.symbol, statuses[&1.id]})
   end
 
-  @doc "Removes the seeded Operator and everything it owns."
+  @doc """
+  Removes the seeded Operator and everything it owns. Raises `ArgumentError`
+  when the database holds any Operator, Agent or Fleet Generation the seed
+  does not own: seeding assumes no real Fleet.
+  """
   def clear! do
-    case Repo.get_by(Operator, email: @email) do
+    seed = Repo.get_by(Operator, email: @email)
+    refuse_foreign_fleet!(seed && seed.id)
+
+    case seed do
       nil ->
         :ok
 
@@ -103,6 +111,24 @@ defmodule SpaceTraders.ScenarioSeeds do
           end)
 
         :ok
+    end
+  end
+
+  defp refuse_foreign_fleet!(seed_id) do
+    owner = seed_id || -1
+
+    foreign? =
+      Repo.exists?(from o in Operator, where: o.id != ^owner) or
+        Repo.exists?(
+          from a in AgentRecord, where: is_nil(a.operator_id) or a.operator_id != ^owner
+        ) or
+        Repo.exists?(
+          from g in Generation, where: is_nil(g.operator_id) or g.operator_id != ^owner
+        )
+
+    if foreign? do
+      raise ArgumentError,
+            "refusing to seed or clear: the database holds Fleet data that is not seed-owned"
     end
   end
 
@@ -180,7 +206,8 @@ defmodule SpaceTraders.ScenarioSeeds do
         symbol: @agent_symbol,
         faction: "COSMIC",
         headquarters: @headquarters,
-        agent_token: "scenario-seed-token",
+        # No game credential: the runtime never runs a seeded Fleet.
+        agent_token: nil,
         operator_id: operator.id
       })
 

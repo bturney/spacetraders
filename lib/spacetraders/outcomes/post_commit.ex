@@ -62,6 +62,20 @@ defmodule SpaceTraders.Outcomes.PostCommit do
   def observe(_observation), do: :ok
 
   @doc """
+  Announces an Intent change of a Ship (`Fleet.broadcast_intent_change/1`)
+  once the writer's transaction commits; a rollback drops it. Outside a
+  transaction, or without a known BEGIN, it is announced at once.
+  """
+  def intent_changed(ship_id) do
+    case Process.get(@pending) do
+      nil -> SpaceTraders.Fleet.broadcast_intent_change(ship_id)
+      pending -> Process.put(@pending, %{pending | intents: [ship_id | pending.intents]})
+    end
+
+    :ok
+  end
+
+  @doc """
   Called inside the Earnings record's own transaction, before its COMMIT: the
   worker emits the record's metrics and Loki line only once it commits.
   """
@@ -89,13 +103,23 @@ defmodule SpaceTraders.Outcomes.PostCommit do
   def durable_change(_event, _measurements, metadata, worker) do
     case metadata do
       %{query: "begin", result: {:ok, _}} ->
-        Process.put(@pending, %{families: MapSet.new(), observations: [], earnings: []})
+        Process.put(@pending, %{
+          families: MapSet.new(),
+          observations: [],
+          earnings: [],
+          intents: []
+        })
 
       %{query: "commit", result: {:ok, _}} ->
         if pending = Process.delete(@pending) do
           notify(worker, pending)
           Enum.each(Enum.reverse(pending.observations), &GenServer.cast(worker, {:observe, &1}))
           Enum.each(Enum.reverse(pending.earnings), &GenServer.cast(worker, {:earnings, &1}))
+
+          pending.intents
+          |> Enum.reverse()
+          |> Enum.uniq()
+          |> Enum.each(&SpaceTraders.Fleet.broadcast_intent_change/1)
         end
 
       %{query: "rollback"} ->
