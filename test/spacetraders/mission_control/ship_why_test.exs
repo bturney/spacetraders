@@ -2,6 +2,9 @@ defmodule SpaceTraders.MissionControl.ShipWhyTest do
   @moduledoc "Ship + Why projection (#772): what a Ship chose, what it beat, and whether it paid off."
   use SpaceTraders.DataCase, async: false
 
+  import Ecto.Query
+
+  alias SpaceTraders.Fleet.Intent
   alias SpaceTraders.MissionControl.ShipWhy
   alias SpaceTraders.ScenarioSeeds
 
@@ -80,5 +83,70 @@ defmodule SpaceTraders.MissionControl.ShipWhyTest do
     assert why.status.reason == "Not enough credits above the floor."
     assert why.status.retries == 2
     assert %DateTime{} = why.status.next_attempt_at
+  end
+
+  describe "a skipped buy (#813)" do
+    setup do
+      seeded = ScenarioSeeds.seed(:healthy, 2)
+      ship = Repo.get_by!(SpaceTraders.Fleet.Ship, symbol: "SEEDED-1")
+      template = Repo.one!(from i in Intent, where: i.ship_id == ^ship.id, limit: 1)
+      %{seeded: seeded, template: template}
+    end
+
+    defp skip(template, finished, observed, max) do
+      Repo.insert!(%{
+        template
+        | id: nil,
+          type: "buy",
+          status: "infeasible",
+          target_waypoint: "X1-UX81-A1",
+          parameters: %{"trade_symbol" => "FUEL"},
+          last_action_result: %{
+            "outcome" => "infeasible",
+            "evidence" => %{
+              "reason" => "price_constraint",
+              "observed_price" => observed,
+              "max_price" => max
+            }
+          },
+          finished_at: finished
+      })
+    end
+
+    test "names the last refused buy: good, Waypoint, live price, planned maximum, time",
+         %{seeded: seeded, template: template} do
+      newer = DateTime.truncate(DateTime.add(seeded.now, -120), :second)
+      skip(template, DateTime.truncate(DateTime.add(seeded.now, -600), :second), 50, 40)
+      skip(template, newer, 66, 63)
+
+      assert %{
+               good: "FUEL",
+               waypoint: "X1-UX81-A1",
+               observed_price: 66,
+               max_price: 63,
+               at: ^newer,
+               replanned?: false
+             } = why(seeded, "SEEDED-1").last_skipped_buy
+    end
+
+    test "separates a successful replan (a later buy completed) from a skip with none",
+         %{seeded: seeded, template: template} do
+      skip(template, DateTime.truncate(DateTime.add(seeded.now, -120), :second), 66, 63)
+
+      Repo.insert!(%{
+        template
+        | id: nil,
+          type: "buy",
+          status: "completed",
+          parameters: %{"trade_symbol" => "FUEL"},
+          finished_at: DateTime.truncate(DateTime.add(seeded.now, -118), :second)
+      })
+
+      assert %{replanned?: true} = why(seeded, "SEEDED-1").last_skipped_buy
+    end
+
+    test "no skipped buy means no entry", %{seeded: seeded} do
+      assert why(seeded, "SEEDED-1").last_skipped_buy == nil
+    end
   end
 end
