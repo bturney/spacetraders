@@ -6,8 +6,8 @@ defmodule SpaceTraders.MissionControl.Motion do
 
   A small Fleet (up to #{6} Ships) is shown as route cards; a larger one as a
   grid of progress cells with per-status counts, plus a row for each Ship that
-  is not earning right now (Stuck, Busy not earning or Busy skipping buys). Waiting on purpose is
-  deliberate and is not listed there.
+  is not earning right now (Stuck, Busy not earning or Busy skipping buys).
+  Waiting on purpose is deliberate and is not listed there.
   """
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord

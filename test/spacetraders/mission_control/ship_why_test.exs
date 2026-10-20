@@ -125,7 +125,7 @@ defmodule SpaceTraders.MissionControl.ShipWhyTest do
                observed_price: 66,
                max_price: 63,
                at: ^newer,
-               replanned?: false
+               bought_since?: false
              } = why(seeded, "SEEDED-1").last_skipped_buy
     end
 
@@ -138,11 +138,39 @@ defmodule SpaceTraders.MissionControl.ShipWhyTest do
         | id: nil,
           type: "buy",
           status: "completed",
+          target_waypoint: "X1-UX81-A1",
           parameters: %{"trade_symbol" => "FUEL"},
           finished_at: DateTime.truncate(DateTime.add(seeded.now, -118), :second)
       })
 
-      assert %{replanned?: true} = why(seeded, "SEEDED-1").last_skipped_buy
+      assert %{bought_since?: true} = why(seeded, "SEEDED-1").last_skipped_buy
+    end
+
+    test "a later buy of another good or Waypoint is not a replan",
+         %{seeded: seeded, template: template} do
+      skip(template, DateTime.truncate(DateTime.add(seeded.now, -120), :second), 66, 63)
+      later = DateTime.truncate(DateTime.add(seeded.now, -118), :second)
+
+      for {good, waypoint} <- [{"IRON_ORE", "X1-UX81-A1"}, {"FUEL", "X1-UX81-B2"}] do
+        Repo.insert!(%{
+          template
+          | id: nil,
+            type: "buy",
+            status: "completed",
+            target_waypoint: waypoint,
+            parameters: %{"trade_symbol" => good},
+            finished_at: later
+        })
+      end
+
+      assert %{bought_since?: false} = why(seeded, "SEEDED-1").last_skipped_buy
+    end
+
+    test "a skip older than the status window is not shown",
+         %{seeded: seeded, template: template} do
+      skip(template, DateTime.truncate(DateTime.add(seeded.now, -31 * 60), :second), 66, 63)
+
+      assert why(seeded, "SEEDED-1").last_skipped_buy == nil
     end
 
     test "no skipped buy means no entry", %{seeded: seeded} do

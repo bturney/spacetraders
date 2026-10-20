@@ -174,7 +174,22 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     earnings(ctx, 300, 30 * 60)
     skipped_buys(ctx, 4, 10 * 60)
 
-    assert %{kind: :busy_not_earning, phrase: "Last hour 300 vs 1,000/h over 6 h"} = status(ctx)
+    assert %{
+             kind: :busy_not_earning,
+             phrase: "Last hour 300 vs 1,000/h over 6 h; 4 skipped buys in 30 min"
+           } = status(ctx)
+  end
+
+  test "not earning still names the latest skipped price refusal", ctx do
+    aged(ctx, 7 * 3600)
+    earnings(ctx, 5_700, 3 * 3600)
+    earnings(ctx, 300, 30 * 60)
+    skipped_buys(ctx, 3, 10 * 60, price_skip(20, 18), "IRON_ORE")
+
+    assert %{kind: :busy_not_earning, phrase: phrase} = status(ctx)
+
+    assert phrase ==
+             "Last hour 300 vs 1,000/h over 6 h; 3 skipped buys in 30 min; last IRON_ORE 20 > 18"
   end
 
   test "skipped buys older than 30 minutes do not count", ctx do

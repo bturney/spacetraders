@@ -52,6 +52,12 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
     on_exit(&restart_capacity_governor/0)
   end
 
+  # Safe only because this module is `async: false`: ExUnit runs every async
+  # module first, then sync modules one at a time, so no other test can hold an
+  # admission or call the governor while it restarts. Restarting instead of
+  # capturing and restoring its state also drops earlier cases' 429/5xx
+  # pressure and leaked admissions, which restoring would put back. Keep any
+  # other test that uses the app-wide governor `async: false` too.
   defp restart_capacity_governor do
     governor = SpaceTraders.API.CapacityGovernor
     :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, governor)

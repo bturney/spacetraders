@@ -145,7 +145,8 @@ defmodule SpaceTradersWeb.ShipLiveTest do
     assert card =~ "A1"
     assert card =~ "66"
     assert card =~ "63"
-    assert card =~ "price guardrail"
+    refute card =~ "guardrail"
+    assert card =~ "Not bought since."
     refute_received {:transport_receipt, _, _}
   end
 

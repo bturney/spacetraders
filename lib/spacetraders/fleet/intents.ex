@@ -4934,6 +4934,31 @@ defmodule SpaceTraders.Fleet.Intents do
     )
   end
 
+  @doc """
+  The price refusal of an infeasible buy Intent, read back from the evidence
+  `mark_infeasible/2` wrote: `%{good, observed_price, max_price}`, else `nil`
+  (#813). The one reader of those evidence keys, for Ship status and Ship + Why.
+  """
+  def price_skip(%Intent{last_action_result: result} = intent) do
+    case result do
+      %{
+        "evidence" => %{
+          "reason" => "price_constraint",
+          "observed_price" => observed,
+          "max_price" => limit
+        }
+      } ->
+        %{
+          good: (intent.parameters || %{})["trade_symbol"],
+          observed_price: observed,
+          max_price: limit
+        }
+
+      _ ->
+        nil
+    end
+  end
+
   # A price refusal carries its two prices as fields (#813); readers never
   # parse an inspected tuple. Other reasons keep their inspected details.
   defp infeasibility_details({:price_constraint, observed, limit}),

@@ -272,17 +272,17 @@ defmodule SpaceTradersWeb.ShipLive do
     "#{name} #{code(source)}→#{code(destination)}"
   end
 
-  # The price guardrail refused the buy; a later completed buy is the replan.
+  # A later completed buy of the same good ends the skip.
   defp skipped_buy(skip) do
     what = "#{good_name(skip.good)} at #{code(skip.waypoint)}"
 
     why =
       if skip.observed_price && skip.max_price,
         do:
-          "live price #{format_int(skip.observed_price)} was above the planned maximum #{format_int(skip.max_price)} (price guardrail)",
+          "live price #{format_int(skip.observed_price)} was above the planned maximum #{format_int(skip.max_price)}",
         else: "the buy step ended infeasible"
 
-    outcome = if skip.replanned?, do: "Replanned and bought since.", else: "Not bought since."
+    outcome = if skip.bought_since?, do: "Bought since.", else: "Not bought since."
     "Skipped buying #{what}: #{why}. #{outcome}"
   end
 

@@ -31,7 +31,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Fleet.{Intent, Ship}
+  alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{AllocationResultPointer, Commitment, Portfolio}
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
@@ -47,6 +47,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   # The earning ratio and its windows are Plan Health's (`PlanHealth.thresholds/0`).
   @history_seconds 3600
   @skipped_buy_window_seconds 30 * 60
+  @skipped_buy_window_minutes div(@skipped_buy_window_seconds, 60)
   @skipped_buys 3
 
   @stall_reasons %{
@@ -55,6 +56,9 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     overdue_demands_without_coverage:
       "Fleet planning stalled: markets are overdue and nobody refreshes them"
   }
+
+  @doc "Seconds a skipped buy counts for status and for Ship + Why (#813)."
+  def skipped_buy_window_seconds, do: @skipped_buy_window_seconds
 
   @doc "The six statuses, in display order."
   def statuses, do: @statuses
@@ -187,32 +191,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     |> Repo.all()
     |> Enum.group_by(& &1.ship_id)
     |> Map.new(fn {ship_id, intents} ->
-      {ship_id, %{count: length(intents), last: skip_reason(List.last(intents))}}
+      {ship_id, %{count: length(intents), last: Intents.price_skip(List.last(intents))}}
     end)
-  end
-
-  @doc """
-  Why a buy step was skipped: `%{good, observed_price, max_price}` when its
-  stored evidence is a price refusal, else `nil` (#813).
-  """
-  def skip_reason(%Intent{} = intent) do
-    case intent.last_action_result do
-      %{
-        "evidence" => %{
-          "reason" => "price_constraint",
-          "observed_price" => observed,
-          "max_price" => limit
-        }
-      } ->
-        %{
-          good: (intent.parameters || %{})["trade_symbol"],
-          observed_price: observed,
-          max_price: limit
-        }
-
-      _ ->
-        nil
-    end
   end
 
   defp earnings(nil, _symbols, _now, _thresholds), do: %{}
@@ -297,7 +277,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     {status, details} =
       stuck(intent, assignment, facts.stall) ||
         waiting(assignment, facts.neutral_wait) ||
-        busy_not_earning(
+        busy_status(
           ship,
           facts.skipped[ship.id] || %{count: 0},
           earned,
@@ -355,7 +335,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
   defp waiting(_assignment, _wait), do: nil
 
-  defp busy_not_earning(ship, %{count: skipped} = skips, earned, thresholds, now) do
+  # Either busy status, or nil: not earning wins over skipping buys.
+  defp busy_status(ship, %{count: skipped} = skips, earned, thresholds, now) do
     %{earning_ratio: ratio, hour_seconds: hour, average_window_seconds: window} = thresholds
     history = DateTime.diff(now, ship.inserted_at)
 
@@ -379,7 +360,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
              %{
                phrase:
                  "Last hour #{format_int(last_hour)} vs #{format_int(round(average))}/h " <>
-                   "over #{format_hours(hours)} h"
+                   "over #{format_hours(hours)} h" <> skip_suffix(skipped, skips[:last])
              }}
 
           skipped >= @skipped_buys ->
@@ -391,11 +372,18 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     end
   end
 
-  defp skipped_phrase(count, %{good: good, observed_price: observed, max_price: limit})
-       when is_binary(good),
-       do: "#{count} skipped buys in 30 min; last #{good} #{observed} > #{limit}"
+  defp skipped_phrase(count, last) do
+    "#{count} skipped buys in #{@skipped_buy_window_minutes} min" <> skip_last(last)
+  end
 
-  defp skipped_phrase(count, _last), do: "#{count} skipped buys in 30 min"
+  # Not earning stays the headline; 3+ skipped buys still name the latest.
+  defp skip_suffix(count, last) when count >= @skipped_buys, do: "; " <> skipped_phrase(count, last)
+  defp skip_suffix(_count, _last), do: ""
+
+  defp skip_last(%{good: good, observed_price: observed, max_price: limit}) when is_binary(good),
+    do: "; last #{good} #{observed} > #{limit}"
+
+  defp skip_last(_last), do: ""
 
   defp working(nil, _intent, _ship, _facts),
     do: {:waiting, %{phrase: "Waiting for new orders"}}

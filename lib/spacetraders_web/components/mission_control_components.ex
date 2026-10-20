@@ -14,7 +14,6 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   @tones %{
     trading: "bg-trading/9 border-trading/35",
     busy: "bg-busy/9 border-busy/35",
-    skipping: "bg-busy/9 border-busy/35",
     waiting: "bg-waiting/9 border-waiting/35",
     stuck: "bg-stuck/9 border-stuck/35",
     scouting: "bg-scouting/9 border-scouting/35",
@@ -23,6 +22,8 @@ defmodule SpaceTradersWeb.MissionControlComponents do
     setback: "bg-warning/9 border-warning/35",
     off: "bg-error/9 border-error/35"
   }
+  # Busy, skipping buys looks like Busy, not earning.
+  @tones Map.put(@tones, :skipping, @tones.busy)
 
   @status %{
     trading: {"Trading", "bg-trading/16 text-trading", "bg-trading"},
@@ -36,11 +37,12 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   @fill %{
     trading: {"bg-trading/55", "bg-trading", "shadow-[0_0_8px_var(--color-trading)]"},
     busy: {"bg-busy/55", "bg-busy", "shadow-[0_0_8px_var(--color-busy)]"},
-    skipping: {"bg-busy/55", "bg-busy", "shadow-[0_0_8px_var(--color-busy)]"},
     waiting: {"bg-waiting/55", "bg-waiting", "shadow-[0_0_8px_var(--color-waiting)]"},
     stuck: {"bg-stuck/55", "bg-stuck", "shadow-[0_0_8px_var(--color-stuck)]"},
     scouting: {"bg-scouting/55", "bg-scouting", "shadow-[0_0_8px_var(--color-scouting)]"}
   }
+  # Busy, skipping buys looks like Busy, not earning.
+  @fill Map.put(@fill, :skipping, @fill.busy)
 
   @doc "Statuses a Ship can show, in the fixed vocabulary."
   def statuses, do: Map.keys(@status)
@@ -567,11 +569,12 @@ defmodule SpaceTradersWeb.MissionControlComponents do
   @cell %{
     trading: {"bg-trading/18", "bg-trading/70"},
     busy: {"bg-busy/18", "bg-busy/70"},
-    skipping: {"bg-busy/18", "bg-busy/70"},
     waiting: {"bg-waiting/18", "bg-waiting/70"},
     stuck: {"bg-stuck/18", "bg-stuck/70"},
     scouting: {"bg-scouting/18", "bg-scouting/70"}
   }
+  # Busy, skipping buys looks like Busy, not earning.
+  @cell Map.put(@cell, :skipping, @cell.busy)
 
   @chips %{
     trading: :trading,
