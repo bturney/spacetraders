@@ -58,10 +58,11 @@ defmodule SpaceTradersWeb.MissionControlComponentsTest do
     assert html =~ "Alone"
   end
 
-  test "status chip uses the fixed wording for all five statuses" do
+  test "status chip uses the fixed wording for all six statuses" do
     labels = %{
       trading: "Trading",
       busy: "Busy, not earning",
+      skipping: "Busy, skipping buys",
       waiting: "Waiting on purpose",
       stuck: "Stuck",
       scouting: "Scouting prices"

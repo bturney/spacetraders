@@ -139,14 +139,32 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
              status(ctx)
   end
 
-  test "three skipped buys in 30 minutes make a Ship with an hour of history Busy not earning",
+  test "three skipped buys in 30 minutes make a Ship with an hour of history Busy skipping buys",
        ctx do
     aged(ctx, 2 * 3600)
     skipped_buys(ctx, 3, 20 * 60)
 
     status = status(ctx)
-    assert status.kind == :busy_not_earning
+    assert status.kind == :busy_skipping_buys
     assert status.phrase == "3 skipped buys in 30 min"
+  end
+
+  test "a profitable Ship with skipped buys is Busy skipping buys, not Busy not earning", ctx do
+    aged(ctx, 7 * 3600)
+    earnings(ctx, 5_000, 3 * 3600)
+    earnings(ctx, 1_200, 30 * 60)
+    skipped_buys(ctx, 9, 10 * 60)
+
+    assert %{kind: :busy_skipping_buys} = status(ctx)
+  end
+
+  test "weak earnings win over skipped buys: the economic problem is named", ctx do
+    aged(ctx, 7 * 3600)
+    earnings(ctx, 5_700, 3 * 3600)
+    earnings(ctx, 300, 30 * 60)
+    skipped_buys(ctx, 4, 10 * 60)
+
+    assert %{kind: :busy_not_earning, phrase: "Last hour 300 vs 1,000/h over 6 h"} = status(ctx)
   end
 
   test "skipped buys older than 30 minutes do not count", ctx do
