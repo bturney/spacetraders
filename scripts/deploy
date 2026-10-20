@@ -13,7 +13,8 @@ run_remote() {
   local revision=$1
   local command=$2
   git archive --format=tar "$revision" -- \
-    compose.yaml compose.production.yaml scripts/deploy-host scripts/postgres-recovery | gzip | \
+    compose.yaml compose.production.yaml scripts/deploy-host scripts/postgres-recovery \
+    scripts/purge-gameplay | gzip | \
     tailscale ssh "$HOST" "set -euo pipefail; temporary=\$(mktemp -d); trap 'rm -rf \"\$temporary\"' EXIT; tar --extract --gzip --file - --directory \"\$temporary\"; cd /srv/projects/spacetraders; SPACETRADERS_DEPLOY_DIR=/srv/projects/spacetraders SPACETRADERS_BUNDLE_DIR=\"\$temporary\" $command"
 }
 
@@ -51,7 +52,15 @@ case "${1:-}" in
     [[ $# -eq 2 ]] || die "Usage: scripts/deploy postgres-restore-rehearsal <directory>"
     run_remote HEAD "\"\$temporary/scripts/postgres-recovery\" restore-rehearsal $(printf '%q' "$2")"
     ;;
+  purge-gameplay)
+    [[ $# -eq 2 ]] || die "Usage: scripts/deploy purge-gameplay {--dry-run|--execute}"
+    case "$2" in
+      --dry-run | --execute) ;;
+      *) die "Usage: scripts/deploy purge-gameplay {--dry-run|--execute}" ;;
+    esac
+    run_remote HEAD "\"\$temporary/scripts/purge-gameplay\" $(printf '%q' "$2")"
+    ;;
   *)
-    die "Usage: scripts/deploy {deploy <sha|tag>|rollback|postgres-health|postgres-backup [directory]|postgres-restore-rehearsal <directory>}"
+    die "Usage: scripts/deploy {deploy <sha|tag>|rollback|postgres-health|postgres-backup [directory]|postgres-restore-rehearsal <directory>|purge-gameplay {--dry-run|--execute}}"
     ;;
 esac

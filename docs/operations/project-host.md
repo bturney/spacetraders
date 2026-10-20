@@ -99,6 +99,27 @@ A deployment includes the repeatable migration lifecycle. Health verification
 is complete when the command reports `accepting connections` and emits
 `operation=health status=completed` with one `operation_id`.
 
+## Purge gameplay data
+
+`scripts/purge-gameplay` removes every Generation, Agent, Ship, Intent,
+observation, calibration and outbox row. It preserves the deployment Operator
+password hash and encrypted AccountToken, Operator sessions, the agent name
+bank, and the runtime authority row. It rebuilds `current_fleet_identity` with
+no Generation so boot reaches the `:empty` state.
+
+There is no automatic backup. Inspect the table list and row counts first, then
+execute:
+
+```sh
+scripts/deploy purge-gameplay --dry-run
+scripts/deploy purge-gameplay --execute
+```
+
+`--execute` stops `web`, truncates and rebuilds in one transaction, verifies the
+purged tables are empty and `preflight_current_fleet()` passes, then starts
+`web`. Afterwards the Operator logs in and uses Settings to mint or import an
+Agent. Purged rows cannot be restored without a dump taken beforehand.
+
 ## Backup
 
 Create a backup on the host:
