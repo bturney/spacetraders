@@ -278,7 +278,8 @@ defmodule SpaceTradersWeb.ShipLive do
 
     why =
       if skip.observed_price && skip.max_price,
-        do: "live price #{format_int(skip.observed_price)} was above the planned maximum #{format_int(skip.max_price)} (price guardrail)",
+        do:
+          "live price #{format_int(skip.observed_price)} was above the planned maximum #{format_int(skip.max_price)} (price guardrail)",
         else: "the buy step ended infeasible"
 
     outcome = if skip.replanned?, do: "Replanned and bought since.", else: "Not bought since."

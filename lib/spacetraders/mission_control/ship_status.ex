@@ -297,7 +297,13 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     {status, details} =
       stuck(intent, assignment, facts.stall) ||
         waiting(assignment, facts.neutral_wait) ||
-        busy_not_earning(ship, facts.skipped[ship.id] || %{count: 0}, earned, facts.thresholds, now) ||
+        busy_not_earning(
+          ship,
+          facts.skipped[ship.id] || %{count: 0},
+          earned,
+          facts.thresholds,
+          now
+        ) ||
         working(assignment, intent, ship, facts)
 
     base
