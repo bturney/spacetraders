@@ -6,6 +6,9 @@
 
 ## Current position
 
+**Sprint selection: 2026-10-20.** [Spec #821 — Adaptive Fleet Economics](https://github.com/bturney/spacetraders/issues/821) is the **single tracking parent** for the next Gate 0 sprint. The approved direction is evidence-led, reset-aware allocation of economically justified productive capacity—not a forced third-Ship purchase or hardcoded opening sequence. Its principles-only Erlang/fork research is to become a child ticket through `/to-tickets`; existing Operator-truth and CI reliability issues are sequenced in the spec and carry text parent/blocker fallbacks pending native GitHub linkage. **Status: specified; ticket breakdown and implementation not started.** Gate 0 remains unproven on the current build; ADR 0016 is unchanged until a separately reviewed policy amendment; simulator qualification and live gameplay remain independent.
+
+
 - **Operator Experience Recovery:** [#757](https://github.com/bturney/spacetraders/issues/757) closed and [PR #802](https://github.com/bturney/spacetraders/pull/802) merged. The Operator finds it broadly usable, with minor visual defects. [#776](https://github.com/bturney/spacetraders/issues/776) still owns formal device, cutover and deployed-query acceptance; address residual defects as scoped follow-ups.
 - **Economic evidence:** the [accepted 24-hour production soak #691](https://github.com/bturney/spacetraders/issues/691) proved 279 known-Net completed trips and **+427,124 credits Net Earnings** on its pinned earlier release. That is evidence of sustained profitable trading, **not** proof of productive Fleet growth or the newest build.
 - **Current frontier:** establish which part of the **economic foundation** remains unproven on current code, then select a small end-to-end gameplay increment. Use retained production evidence and deterministic tests. Simulator completion is not a handoff condition.
