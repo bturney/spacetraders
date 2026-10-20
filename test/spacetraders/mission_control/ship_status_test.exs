@@ -58,9 +58,25 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
 
     scouting = ctx.intent |> Ecto.Changeset.change(type: "acquire_intelligence") |> Repo.update!()
 
-    for _ <- 1..2 do
-      Repo.insert!(%{scouting | id: nil, status: "completed", finished_at: ctx.now})
+    # Each refresh is its own Commitment, so the count follows the Ship over
+    # the last hour rather than its current assignment.
+    for minutes_ago <- [5, 40] do
+      Repo.insert!(%{
+        scouting
+        | id: nil,
+          fleet_commitment_id: nil,
+          status: "completed",
+          finished_at: DateTime.add(ctx.now, -minutes_ago * 60)
+      })
     end
+
+    Repo.insert!(%{
+      scouting
+      | id: nil,
+        fleet_commitment_id: nil,
+        status: "completed",
+        finished_at: DateTime.add(ctx.now, -61 * 60)
+    })
 
     overdue_demands(ctx, 3)
 
@@ -68,7 +84,7 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     assert status.kind == :scouting
     assert status.markets_refreshed == 2
     assert status.markets_overdue == 3
-    assert status.phrase == "Refreshing markets: 2 refreshed, 3 overdue"
+    assert status.phrase == "Refreshing markets: 2 refreshed in the last hour, 3 overdue"
   end
 
   test "an unassigned Ship during a Neutral Wait is Waiting on purpose until the next check",
