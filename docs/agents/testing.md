@@ -29,9 +29,12 @@ planning and execution; keep deterministic regressions at their public seams.
 
 ## Release and deployment verification
 
-Separate required CI job; needs Docker Compose and the pinned toolchain/deps:
+Separate required CI job. The deployment-script regression suite uses isolated
+command doubles and needs only Python 3 and Bash, with no production access.
+The remaining checks need Docker Compose and the pinned toolchain/deps:
 
 ```sh
+python3 test/integration/deploy_host_test.py
 test/integration/postgres_compose_test.sh
 test/integration/release_boot_test.sh
 test/integration/migration_repair_test.sh
