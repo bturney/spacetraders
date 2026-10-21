@@ -377,7 +377,9 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   end
 
   # Not earning stays the headline; 3+ skipped buys still name the latest.
-  defp skip_suffix(count, last) when count >= @skipped_buys, do: "; " <> skipped_phrase(count, last)
+  defp skip_suffix(count, last) when count >= @skipped_buys,
+    do: "; " <> skipped_phrase(count, last)
+
   defp skip_suffix(_count, _last), do: ""
 
   defp skip_last(%{good: good, observed_price: observed, max_price: limit}) when is_binary(good),

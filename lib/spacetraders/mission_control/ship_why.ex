@@ -108,7 +108,10 @@ defmodule SpaceTraders.MissionControl.ShipWhy do
           i.ship_id == ^ship.id and i.type == "buy" and i.status == "completed" and
             i.finished_at >= ^skipped.finished_at
 
-    query = if good, do: where(query, [i], fragment("?->>'trade_symbol'", i.parameters) == ^good), else: query
+    query =
+      if good,
+        do: where(query, [i], fragment("?->>'trade_symbol'", i.parameters) == ^good),
+        else: query
 
     query =
       if skipped.target_waypoint,
