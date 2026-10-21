@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Drops this worktree's own test database; the next `mix test` recreates and
+# migrates it. Use when leftover committed rows break boot or fixtures.
+# Touches only the name config/checkout_db.exs derives for this checkout:
+# refuses in the main checkout and when DATABASE_URL overrides it.
+# Usage: scripts/reset-test-db
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [ -n "${DATABASE_URL:-}" ]; then
+  echo "reset-test-db: DATABASE_URL is set; unset it to reset this checkout's database" >&2
+  exit 2
+fi
+
+main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+if [ "$(cd "$main" && pwd -P)" = "$(pwd -P)" ]; then
+  echo "reset-test-db: refusing in the main checkout (spacetraders_test)" >&2
+  exit 2
+fi
+
+MIX_ENV=test mix ecto.drop --force-drop

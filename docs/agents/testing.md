@@ -2,6 +2,8 @@
 
 Gate checks and output contract: `lib/mix/tasks/verify.ex`.
 Local verification fixes formatting, then fails at `format` until those edits are committed.
+`scripts/verify` installs `.githooks/pre-push`, which blocks pushing unformatted files.
+Polluted test DB (leftover rows break boot/fixtures) → `scripts/reset-test-db`; drops only this worktree's database.
 
 ## Runtime test lifecycle
 
