@@ -35,8 +35,9 @@ validate_image() {
 
 health_check() {
   local response
-  response=$(curl --fail --silent --show-error --retry 10 --retry-all-errors --retry-connrefused \
-    --retry-delay 1 --connect-timeout 5 --max-time 10 "$HEALTH_URL") || return 1
+  # Boot recovery can finish after the old ten-second retry window.
+  response=$(curl --fail --silent --show-error --retry 60 --retry-all-errors --retry-connrefused \
+    --retry-delay 1 --retry-max-time 60 --connect-timeout 5 --max-time 10 "$HEALTH_URL") || return 1
   [[ "$response" == '{"status":"ok"}' ]]
 }
 
@@ -77,14 +78,14 @@ running_image() {
 
 rollback_candidate_before_deploy() {
   if [[ -s "$STATE_FILE" ]]; then
-    <"$STATE_FILE"
+    cat "$STATE_FILE"
   else
     running_image
   fi
 }
 
 recorded_rollback_image() {
-  [[ -s "$PREVIOUS_STATE_FILE" ]] && <"$PREVIOUS_STATE_FILE"
+  [[ -s "$PREVIOUS_STATE_FILE" ]] && cat "$PREVIOUS_STATE_FILE"
 }
 
 record_success() {

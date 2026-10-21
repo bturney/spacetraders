@@ -67,6 +67,9 @@ The migration service migrates PostgreSQL, and `web` starts only after it
 succeeds. Deployment is complete when `GET /health` returns `{"status":"ok"}`
 and the host records the application image.
 
+The health check allows a 60-second retry window for application startup. Each
+request is capped at 10 seconds; a final request can finish after that window.
+
 A failed deployment makes a best-effort attempt to start the previous image.
 Fix failed releases and deploy forward when rollback cannot recover service.
 
