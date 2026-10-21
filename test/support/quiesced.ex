@@ -15,7 +15,8 @@ defmodule SpaceTraders.Quiesced do
   stop between cases. Production `ShipServer.stop/1` stays plain.
 
   Quiescing suspends the process and polls DBConnection's internal
-  `DBConnection.Holder` ETS tables; that is test-only teardown, so it lives here.
+  `DBConnection.Holder` ETS tables, and its stack for an unserved checkout
+  request; that is test-only teardown, so it lives here.
 
   The wrapper keeps the child's id. A child that dies on its own (a test killing
   the runtime) takes the wrapper down with it, without a restart.
@@ -80,7 +81,7 @@ defmodule SpaceTraders.Quiesced do
   defp await_checkin(pid, 0), do: suspend(pid)
 
   defp await_checkin(pid, attempts) do
-    if suspend(pid) and holds_connection?(pid) do
+    if suspend(pid) and (holds_connection?(pid) or awaiting_checkout?(pid)) do
       resume(pid)
       Process.sleep(@poll_ms)
       await_checkin(pid, attempts - 1)
@@ -93,6 +94,19 @@ defmodule SpaceTraders.Quiesced do
     Enum.any?(:ets.all(), fn table ->
       :ets.info(table, :name) == @holder and acting_for?(:ets.info(table, :owner), pid)
     end)
+  end
+
+  # A checkout request the ownership proxy has not served yet owns no Holder
+  # table: the proxy hands it over (even to a suspended requester) whenever it
+  # next runs, so stopping the requester now would still disconnect (#818).
+  defp awaiting_checkout?(pid) do
+    case Process.info(pid, :current_stacktrace) do
+      {:current_stacktrace, stack} ->
+        Enum.any?(stack, &match?({DBConnection.Holder, :checkout_call, _, _}, &1))
+
+      nil ->
+        false
+    end
   end
 
   defp acting_for?(pid, pid), do: true

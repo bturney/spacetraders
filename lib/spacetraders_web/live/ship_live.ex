@@ -136,6 +136,13 @@ defmodule SpaceTradersWeb.ShipLive do
           </div>
         </.card>
 
+        <.card :if={@why.last_skipped_buy} id="ship-skipped-buy">
+          <.eyebrow>
+            Last skipped buy<:right>{clock(@why.last_skipped_buy.at)}</:right>
+          </.eyebrow>
+          <p class="mt-1 text-xs">{skipped_buy(@why.last_skipped_buy)}</p>
+        </.card>
+
         <.card :if={@why.options != []} id="ship-options">
           <.eyebrow>
             Options it had<:right>credits per Ship-hour</:right>
@@ -144,7 +151,7 @@ defmodule SpaceTradersWeb.ShipLive do
             <div :for={option <- @why.options} class="text-xs" data-chosen={to_string(option.chosen?)}>
               <div class="flex justify-between gap-2">
                 <span class={option.chosen? && "font-medium"}>
-                  {trade_name(option)}{option.chosen? && " · chosen"}
+                  {trade_name(option)}{if option.chosen?, do: " · chosen"}
                 </span>
                 <span class="num">{rate(option.rate)}</span>
               </div>
@@ -169,9 +176,9 @@ defmodule SpaceTradersWeb.ShipLive do
               <div class="flex justify-between gap-2">
                 <span>{trade_name(trade)}</span>
                 <span class="num text-dim">
-                  {format_signed(trade.actual)}<span :if={trade.expected}> vs {format_signed(
-                    trade.expected
-                  )}</span>
+                  <span :if={trade.expected}>{format_signed(trade.expected)} vs </span>{format_signed(
+                    trade.actual
+                  )}
                 </span>
               </div>
               <div class="relative h-2">
@@ -264,6 +271,23 @@ defmodule SpaceTradersWeb.ShipLive do
     name = good |> String.split("_") |> Enum.map_join(" ", &String.capitalize/1)
     "#{name} #{code(source)}→#{code(destination)}"
   end
+
+  # A later completed buy of the same good ends the skip.
+  defp skipped_buy(skip) do
+    what = "#{good_name(skip.good)} at #{code(skip.waypoint)}"
+
+    why =
+      if skip.observed_price && skip.max_price,
+        do:
+          "live price #{format_int(skip.observed_price)} was above the planned maximum #{format_int(skip.max_price)}",
+        else: "the buy step ended infeasible"
+
+    outcome = if skip.bought_since?, do: "Bought since.", else: "Not bought since."
+    "Skipped buying #{what}: #{why}. #{outcome}"
+  end
+
+  defp good_name(nil), do: "goods"
+  defp good_name(good), do: good |> String.split("_") |> Enum.map_join(" ", &String.capitalize/1)
 
   defp code(symbol), do: ShipRow.waypoint_code(symbol) || "—"
 

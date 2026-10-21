@@ -25,7 +25,7 @@ prefix; there are no namespaces.
 | `earnings_credits_total` | Counter; `flow` (revenue, goods, fuel, other, expected), `source`, `ship_type`, `good`, `price_age` | Credits of committed Earnings records. |
 | `earnings_trips_total` | Counter; `result` (beat, missed), `source`, `ship_type`, `good`, `price_age` | Committed Earnings records. |
 | `earnings_ship_seconds_total` | Counter; `source`, `ship_type`, `good`, `price_age` | Ship-seconds from taking the work until its last disposal. |
-| `fleet_ships` | Gauge; `status`, `ship_type` | Current Ships by their one status (`trading`, `scouting`, `waiting`, `stuck`, `busy_not_earning`). |
+| `fleet_ships` | Gauge; `status`, `ship_type` | Current Ships by their one status (`trading`, `scouting`, `waiting`, `stuck`, `busy_not_earning`, `busy_skipping_buys`). |
 | `agent_credits` | Gauge; none | Latest authoritative owned Agent balance. |
 
 `price_age` buckets: fresh <10 min, 10-30, >30, n/a. Unread Outcome metrics

@@ -142,6 +142,18 @@ defmodule SpaceTraders.MissionControl.PlanHealthTest do
       assert health.state == :on
     end
 
+    test "Ships Busy, skipping buys earn and do not count as busy" do
+      health =
+        evaluate(
+          facts(
+            ships: ships(List.duplicate(:busy_skipping_buys, 2) ++ List.duplicate(:trading, 2))
+          ),
+          @now
+        )
+
+      assert health.state == :on
+    end
+
     test "a market behind a live trade past the 30 min freshness limit" do
       health =
         evaluate(

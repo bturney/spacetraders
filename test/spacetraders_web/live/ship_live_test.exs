@@ -3,6 +3,7 @@ defmodule SpaceTradersWeb.ShipLiveTest do
   use SpaceTradersWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+  import Ecto.Query, only: [from: 2]
 
   alias SpaceTraders.API.Model
   alias SpaceTraders.Fleet
@@ -24,6 +25,11 @@ defmodule SpaceTradersWeb.ShipLiveTest do
     operator = SpaceTraders.Repo.get!(SpaceTraders.Agent.Operator, seeded.generation.operator_id)
     {:ok, view, html} = live(log_in_operator(conn, operator), ~p"/ships/#{symbol}")
     {seeded, view, html}
+  end
+
+  # Visible text only: drops tags (so data-* attributes never match) and collapses whitespace.
+  defp visible_text(html) do
+    html |> String.replace(~r/<[^>]+>/, " ") |> String.replace(~r/\s+/, " ")
   end
 
   test "requires authentication" do
@@ -48,6 +54,99 @@ defmodule SpaceTradersWeb.ShipLiveTest do
     assert has_element?(view, "#ship-history [id^=trade-]")
     assert render(view) =~ "Trading"
 
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "an option list marks only the chosen option, with no stray text", %{conn: conn} do
+    {_seeded, view, _html} = open(conn, :healthy, "SEEDED-1")
+
+    options = view |> element("#ship-options") |> render() |> visible_text()
+    refute options =~ "false"
+    assert options =~ "Iron Ore A1→B6 · chosen"
+    refute options =~ "Fuel C37→D42 · chosen"
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "trade rows read expected vs actual, matching the card heading", %{conn: conn} do
+    {_seeded, view, _html} = open(conn, :healthy, "SEEDED-1")
+
+    history = view |> element("#ship-history") |> render() |> visible_text()
+    assert history =~ "expected vs actual"
+    assert history =~ "+1,000 vs +900"
+    refute history =~ "+900 vs +1,000"
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "a trade with no expected value still shows its actual value", %{conn: conn} do
+    seeded = ScenarioSeeds.seed(:healthy, 2)
+    operator = SpaceTraders.Repo.get!(SpaceTraders.Agent.Operator, seeded.generation.operator_id)
+
+    SpaceTraders.Repo.insert!(%SpaceTraders.Outcomes.EarningsRecord{
+      source: "test",
+      fleet_generation_id: seeded.generation.id,
+      ship_symbol: "SEEDED-1",
+      ship_type: "HAULER",
+      good: "fuel",
+      source_waypoint: "X1-UX81-A1",
+      destination_waypoint: "X1-UX81-C37",
+      units: 10,
+      revenue: 600,
+      goods_cost: 100,
+      fuel_cost: 0,
+      other_cost: 0,
+      net_earnings: 500,
+      expected_value: nil,
+      ship_seconds: 60,
+      started_at: DateTime.utc_now(),
+      finished_at: DateTime.utc_now()
+    })
+
+    {:ok, view, _html} = live(log_in_operator(conn, operator), ~p"/ships/SEEDED-1")
+
+    history = view |> element("#ship-history") |> render() |> visible_text()
+    assert history =~ "+500"
+    refute history =~ "vs +500"
+    refute_received {:transport_receipt, _, _}
+  end
+
+  test "a Ship that skipped a buy names the good, Waypoint, live price and planned maximum",
+       %{conn: conn} do
+    seeded = ScenarioSeeds.seed(:healthy, 2)
+    ship = SpaceTraders.Repo.get_by!(SpaceTraders.Fleet.Ship, symbol: "SEEDED-1")
+
+    template =
+      SpaceTraders.Repo.one!(
+        from(i in SpaceTraders.Fleet.Intent, where: i.ship_id == ^ship.id, limit: 1)
+      )
+
+    SpaceTraders.Repo.insert!(%{
+      template
+      | id: nil,
+        type: "buy",
+        status: "infeasible",
+        target_waypoint: "X1-UX81-A1",
+        parameters: %{"trade_symbol" => "FUEL"},
+        last_action_result: %{
+          "outcome" => "infeasible",
+          "evidence" => %{
+            "reason" => "price_constraint",
+            "observed_price" => 66,
+            "max_price" => 63
+          }
+        },
+        finished_at: DateTime.utc_now(:second)
+    })
+
+    operator = SpaceTraders.Repo.get!(SpaceTraders.Agent.Operator, seeded.generation.operator_id)
+    {:ok, view, _html} = live(log_in_operator(conn, operator), ~p"/ships/SEEDED-1")
+
+    card = view |> element("#ship-skipped-buy") |> render()
+    assert card =~ "Fuel"
+    assert card =~ "A1"
+    assert card =~ "66"
+    assert card =~ "63"
+    refute card =~ "guardrail"
+    assert card =~ "Not bought since."
     refute_received {:transport_receipt, _, _}
   end
 

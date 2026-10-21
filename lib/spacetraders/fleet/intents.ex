@@ -4885,13 +4885,14 @@ defmodule SpaceTraders.Fleet.Intents do
       "intent_id" => intent.id,
       "intent_type" => intent.type,
       "reason" => infeasibility_reason(reason),
-      "details" => inspect(reason),
       "target_waypoint" => intent.target_waypoint,
       "commitment_id" => intent.fleet_commitment_id,
       "portfolio_id" => intent.fleet_commitment_portfolio_id,
       "portfolio_version" => intent.fleet_commitment_portfolio_version,
       "observed_at" => DateTime.to_iso8601(now)
     }
+
+    evidence = Map.merge(evidence, infeasibility_details(reason))
 
     ship = Repo.get!(Ship, intent.ship_id)
     agent = Repo.get!(AgentRecord, ship.agent_id)
@@ -4932,6 +4933,38 @@ defmodule SpaceTraders.Fleet.Intents do
       finished_at: now
     )
   end
+
+  @doc """
+  The price refusal of an infeasible buy Intent, read back from the evidence
+  `mark_infeasible/2` wrote: `%{good, observed_price, max_price}`, else `nil`
+  (#813). The one reader of those evidence keys, for Ship status and Ship + Why.
+  """
+  def price_skip(%Intent{last_action_result: result} = intent) do
+    case result do
+      %{
+        "evidence" => %{
+          "reason" => "price_constraint",
+          "observed_price" => observed,
+          "max_price" => limit
+        }
+      } ->
+        %{
+          good: (intent.parameters || %{})["trade_symbol"],
+          observed_price: observed,
+          max_price: limit
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  # A price refusal carries its two prices as fields (#813); readers never
+  # parse an inspected tuple. Other reasons keep their inspected details.
+  defp infeasibility_details({:price_constraint, observed, limit}),
+    do: %{"observed_price" => observed, "max_price" => limit}
+
+  defp infeasibility_details(reason), do: %{"details" => inspect(reason)}
 
   defp infeasibility_reason(reason) do
     case intents_block_reason(reason) do

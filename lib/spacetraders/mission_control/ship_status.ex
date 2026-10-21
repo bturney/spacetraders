@@ -1,6 +1,6 @@
 defmodule SpaceTraders.MissionControl.ShipStatus do
   @moduledoc """
-  The one per-Ship status read (#767): each Ship gets exactly one of five
+  The one per-Ship status read (#767): each Ship gets exactly one of six
   statuses from stored facts, never from the game or the Agent balance.
 
   In precedence order:
@@ -11,9 +11,13 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     * `:waiting` (Waiting on purpose) - unassigned during a Neutral Wait, with
       the wait's next check; an unassigned Ship outside a Neutral Wait waits
       for new orders with no check time;
-    * `:busy_not_earning` - with at least an hour of its own history, 3 or
-      more skipped buys in 30 minutes, or last-hour Net Earnings below 40% of
-      its average per hour over the last 6 h (or its whole history if younger);
+    * `:busy_not_earning` - with at least an hour of its own history,
+      last-hour Net Earnings below 40% of its average per hour over the last
+      6 h (or its whole history if younger): an economic problem;
+    * `:busy_skipping_buys` - with at least an hour of its own history and
+      earnings not below that bar, 3 or more skipped buys in 30 minutes: a
+      planned trade was refused (usually a price move), a price or planning
+      issue, not a failure to earn (#816);
     * `:trading` - a trade assignment, with the leg in progress;
     * `:scouting` - a Market-refresh assignment, with markets it refreshed
       and the Agent's overdue Markets.
@@ -27,7 +31,7 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   import Ecto.Query
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
-  alias SpaceTraders.Fleet.{Intent, Ship}
+  alias SpaceTraders.Fleet.{Intent, Intents, Ship}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{AllocationResultPointer, Commitment, Portfolio}
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
@@ -37,12 +41,13 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
   alias SpaceTraders.Outcomes.EarningsRecord
   alias SpaceTraders.Repo
 
-  @statuses [:trading, :scouting, :waiting, :stuck, :busy_not_earning]
+  @statuses [:trading, :scouting, :waiting, :stuck, :busy_not_earning, :busy_skipping_buys]
 
   # Prototype thresholds (spec #757); tuning them does not change the rules.
   # The earning ratio and its windows are Plan Health's (`PlanHealth.thresholds/0`).
   @history_seconds 3600
   @skipped_buy_window_seconds 30 * 60
+  @skipped_buy_window_minutes div(@skipped_buy_window_seconds, 60)
   @skipped_buys 3
 
   @stall_reasons %{
@@ -52,7 +57,10 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       "Fleet planning stalled: markets are overdue and nobody refreshes them"
   }
 
-  @doc "The five statuses, in display order."
+  @doc "Seconds a skipped buy counts for status and for Ship + Why (#813)."
+  def skipped_buy_window_seconds, do: @skipped_buy_window_seconds
+
+  @doc "The six statuses, in display order."
   def statuses, do: @statuses
 
   @doc "Number of Ships of each status (every status present, zero or more)."
@@ -169,6 +177,8 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     end
   end
 
+  # Per Ship: how many buys were skipped in the window, and the latest one's
+  # reason (its good and the two prices, when it was a price refusal).
   defp skipped_buys(ship_ids, now) do
     since = DateTime.add(now, -@skipped_buy_window_seconds)
 
@@ -176,11 +186,13 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       where:
         i.ship_id in ^ship_ids and i.type == "buy" and i.status == "infeasible" and
           i.finished_at >= ^since,
-      group_by: i.ship_id,
-      select: {i.ship_id, count(i.id)}
+      order_by: [asc: i.finished_at, asc: i.id]
     )
     |> Repo.all()
-    |> Map.new()
+    |> Enum.group_by(& &1.ship_id)
+    |> Map.new(fn {ship_id, intents} ->
+      {ship_id, %{count: length(intents), last: Intents.price_skip(List.last(intents))}}
+    end)
   end
 
   defp earnings(nil, _symbols, _now, _thresholds), do: %{}
@@ -265,7 +277,13 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     {status, details} =
       stuck(intent, assignment, facts.stall) ||
         waiting(assignment, facts.neutral_wait) ||
-        busy_not_earning(ship, facts.skipped[ship.id] || 0, earned, facts.thresholds, now) ||
+        busy_status(
+          ship,
+          facts.skipped[ship.id] || %{count: 0},
+          earned,
+          facts.thresholds,
+          now
+        ) ||
         working(assignment, intent, ship, facts)
 
     base
@@ -317,16 +335,14 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
   defp waiting(_assignment, _wait), do: nil
 
-  defp busy_not_earning(ship, skipped, earned, thresholds, now) do
+  # Either busy status, or nil: not earning wins over skipping buys.
+  defp busy_status(ship, %{count: skipped} = skips, earned, thresholds, now) do
     %{earning_ratio: ratio, hour_seconds: hour, average_window_seconds: window} = thresholds
     history = DateTime.diff(now, ship.inserted_at)
 
     cond do
       history < @history_seconds ->
         nil
-
-      skipped >= @skipped_buys ->
-        {:busy_not_earning, %{phrase: "#{skipped} skipped buys in 30 min"}}
 
       true ->
         hours = min(history, window) / hour
@@ -338,16 +354,38 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
         average = window_net / hours
         last_hour = earned[:last_hour] || 0
 
-        if last_hour < ratio * average do
-          {:busy_not_earning,
-           %{
-             phrase:
-               "Last hour #{format_int(last_hour)} vs #{format_int(round(average))}/h " <>
-                 "over #{format_hours(hours)} h"
-           }}
+        cond do
+          last_hour < ratio * average ->
+            {:busy_not_earning,
+             %{
+               phrase:
+                 "Last hour #{format_int(last_hour)} vs #{format_int(round(average))}/h " <>
+                   "over #{format_hours(hours)} h" <> skip_suffix(skipped, skips[:last])
+             }}
+
+          skipped >= @skipped_buys ->
+            {:busy_skipping_buys, %{phrase: skipped_phrase(skipped, skips[:last])}}
+
+          true ->
+            nil
         end
     end
   end
+
+  defp skipped_phrase(count, last) do
+    "#{count} skipped buys in #{@skipped_buy_window_minutes} min" <> skip_last(last)
+  end
+
+  # Not earning stays the headline; 3+ skipped buys still name the latest.
+  defp skip_suffix(count, last) when count >= @skipped_buys,
+    do: "; " <> skipped_phrase(count, last)
+
+  defp skip_suffix(_count, _last), do: ""
+
+  defp skip_last(%{good: good, observed_price: observed, max_price: limit}) when is_binary(good),
+    do: "; last #{good} #{observed} > #{limit}"
+
+  defp skip_last(_last), do: ""
 
   defp working(nil, _intent, _ship, _facts),
     do: {:waiting, %{phrase: "Waiting for new orders"}}

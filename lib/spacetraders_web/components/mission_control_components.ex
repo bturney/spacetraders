@@ -22,10 +22,13 @@ defmodule SpaceTradersWeb.MissionControlComponents do
     setback: "bg-warning/9 border-warning/35",
     off: "bg-error/9 border-error/35"
   }
+  # Busy, skipping buys looks like Busy, not earning.
+  @tones Map.put(@tones, :skipping, @tones.busy)
 
   @status %{
     trading: {"Trading", "bg-trading/16 text-trading", "bg-trading"},
     busy: {"Busy, not earning", "bg-busy/16 text-busy", "bg-busy"},
+    skipping: {"Busy, skipping buys", "bg-busy/16 text-busy", "bg-busy"},
     waiting: {"Waiting on purpose", "bg-waiting/16 text-waiting", "bg-waiting"},
     stuck: {"Stuck", "bg-stuck/16 text-stuck", "bg-stuck"},
     scouting: {"Scouting prices", "bg-scouting/16 text-scouting", "bg-scouting"}
@@ -38,6 +41,8 @@ defmodule SpaceTradersWeb.MissionControlComponents do
     stuck: {"bg-stuck/55", "bg-stuck", "shadow-[0_0_8px_var(--color-stuck)]"},
     scouting: {"bg-scouting/55", "bg-scouting", "shadow-[0_0_8px_var(--color-scouting)]"}
   }
+  # Busy, skipping buys looks like Busy, not earning.
+  @fill Map.put(@fill, :skipping, @fill.busy)
 
   @doc "Statuses a Ship can show, in the fixed vocabulary."
   def statuses, do: Map.keys(@status)
@@ -568,13 +573,16 @@ defmodule SpaceTradersWeb.MissionControlComponents do
     stuck: {"bg-stuck/18", "bg-stuck/70"},
     scouting: {"bg-scouting/18", "bg-scouting/70"}
   }
+  # Busy, skipping buys looks like Busy, not earning.
+  @cell Map.put(@cell, :skipping, @cell.busy)
 
   @chips %{
     trading: :trading,
     scouting: :scouting,
     waiting: :waiting,
     stuck: :stuck,
-    busy_not_earning: :busy
+    busy_not_earning: :busy,
+    busy_skipping_buys: :skipping
   }
 
   @doc "The status chip atom of a `MissionControl.ShipStatus` kind."

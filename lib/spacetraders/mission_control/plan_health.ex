@@ -485,6 +485,7 @@ defmodule SpaceTraders.MissionControl.PlanHealth do
 
   defp ships_moving(facts, traders) do
     stuck = Enum.filter(traders, &(&1.status == :stuck))
+    # Busy, skipping buys is not counted: those Ships earn (#816).
     busy = Enum.count(traders, &(&1.status == :busy_not_earning))
     total = length(traders)
 

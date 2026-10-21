@@ -12,6 +12,10 @@ defmodule SpaceTraders.MissionControl.ShipWhy do
       chart;
     * a Ship in a Neutral Wait carries `wait`: the best option the wait found,
       when it last checked and when it checks again;
+    * `last_skipped_buy` is the Ship's most recent buy step that ended
+      infeasible (#813): good, Waypoint, live price, planned maximum, time,
+      and whether a later buy of the same good completed (`bought_since?`). Only
+      skips inside the status window show;
     * a stuck Ship's reason, retries and next attempt are in `status`;
     * `history` is its last 10 Earnings records: expected vs actual.
 
@@ -22,7 +26,7 @@ defmodule SpaceTraders.MissionControl.ShipWhy do
 
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet
-  alias SpaceTraders.Fleet.Intent
+  alias SpaceTraders.Fleet.{Intent, Intents}
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetAllocation.{AllocationResultPointer, Commitment}
   alias SpaceTraders.FleetAllocation.StrategyDecisionEpisode, as: Episode
@@ -58,9 +62,63 @@ defmodule SpaceTraders.MissionControl.ShipWhy do
       credits_per_hour: status.credits_per_hour,
       choice: choice,
       options: options(choice),
+      last_skipped_buy: last_skipped_buy(ship, now),
       wait: if(status.kind == :waiting and is_nil(choice), do: wait(generation)),
       history: history(generation, ship.symbol)
     }
+  end
+
+  ## The last skipped buy
+
+  # Only skips inside the status window: older ones say nothing about what
+  # the Ship is doing now, and it keeps the lookup bounded.
+  defp last_skipped_buy(ship, now) do
+    since = DateTime.add(now, -ShipStatus.skipped_buy_window_seconds())
+
+    skipped =
+      Repo.one(
+        from i in Intent,
+          where:
+            i.ship_id == ^ship.id and i.type == "buy" and i.status == "infeasible" and
+              i.finished_at >= ^since,
+          order_by: [desc: i.finished_at, desc: i.id],
+          limit: 1
+      )
+
+    if skipped do
+      price = Intents.price_skip(skipped) || %{}
+      parameters = skipped.parameters || %{}
+
+      %{
+        good: price[:good] || parameters["trade_symbol"],
+        waypoint: skipped.target_waypoint,
+        observed_price: price[:observed_price],
+        max_price: price[:max_price],
+        at: skipped.finished_at,
+        bought_since?: bought_since?(ship, skipped, parameters["trade_symbol"])
+      }
+    end
+  end
+
+  # A later completed buy of the same good (and Waypoint, when the skip had one).
+  defp bought_since?(ship, skipped, good) do
+    query =
+      from i in Intent,
+        where:
+          i.ship_id == ^ship.id and i.type == "buy" and i.status == "completed" and
+            i.finished_at >= ^skipped.finished_at
+
+    query =
+      if good,
+        do: where(query, [i], fragment("?->>'trade_symbol'", i.parameters) == ^good),
+        else: query
+
+    query =
+      if skipped.target_waypoint,
+        do: where(query, [i], i.target_waypoint == ^skipped.target_waypoint),
+        else: query
+
+    Repo.exists?(query)
   end
 
   ## The trade it chose

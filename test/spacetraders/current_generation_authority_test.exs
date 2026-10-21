@@ -44,6 +44,41 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
     }
   end
 
+  # The governor is application-wide and nothing else resets it: a 429, 5xx or
+  # leaked admission from an earlier case would make the capacity fill below
+  # wait unbounded (#819). Each case starts and leaves a fresh governor.
+  setup do
+    restart_capacity_governor()
+    on_exit(&restart_capacity_governor/0)
+  end
+
+  # Safe only because this module is `async: false`: ExUnit runs every async
+  # module first, then sync modules one at a time, so no other test can hold an
+  # admission or call the governor while it restarts. Restarting instead of
+  # capturing and restoring its state also drops earlier cases' 429/5xx
+  # pressure and leaked admissions, which restoring would put back. Keep any
+  # other test that uses the app-wide governor `async: false` too.
+  defp restart_capacity_governor do
+    governor = SpaceTraders.API.CapacityGovernor
+    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, governor)
+    {:ok, _pid} = Supervisor.restart_child(SpaceTraders.Supervisor, governor)
+    :ok
+  end
+
+  # Fills every admitted slot. Only a governor with nothing in flight admits
+  # without waiting, so a polluted one fails here instead of timing out.
+  defp fill_admitted_capacity(governor, operation) do
+    diagnostics = governor.diagnostics()
+
+    assert %{in_flight: 0, deferred: deferred, retry_after_until: nil, outage: nil} = diagnostics
+    assert deferred == %{}
+
+    for _ <- 1..diagnostics.admitted_capacity do
+      {:ok, admission} = governor.admit(operation)
+      admission
+    end
+  end
+
   defp observe_game_requests do
     test = self()
 
@@ -95,10 +130,7 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
       operation = SpaceTraders.API.OperationInventory.fetch!("get-my-ship")
 
       held =
-        for _ <- 1..governor.diagnostics().admitted_capacity do
-          {:ok, admission} = governor.admit(operation)
-          admission
-        end
+        fill_admitted_capacity(governor, operation)
 
       on_exit(fn -> Enum.each(held, &governor.complete(&1, :not_dispatched)) end)
       observer = Task.async(fn -> Evidence.get_ship(current, "ORBITALIST-1") end)
@@ -119,10 +151,7 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
       operation = SpaceTraders.API.OperationInventory.fetch!("accept-contract")
 
       held =
-        for _ <- 1..governor.diagnostics().admitted_capacity do
-          {:ok, admission} = governor.admit(operation)
-          admission
-        end
+        fill_admitted_capacity(governor, operation)
 
       on_exit(fn -> Enum.each(held, &governor.complete(&1, :not_dispatched)) end)
 
@@ -201,6 +230,22 @@ defmodule SpaceTraders.CurrentGenerationAuthorityTest do
       assert {:error, :stale_agent} = Evidence.get_agent(current)
       assert {:error, :stale_agent} = Evidence.get_ship(current, "ORBITALIST-1")
       refute_received {:game_request, _, _, _}
+    end
+  end
+
+  describe "capacity isolation" do
+    test "each case starts with a governor free of earlier cases' pressure" do
+      governor = SpaceTraders.API.CapacityGovernor
+      operation = SpaceTraders.API.OperationInventory.fetch!("get-my-ship")
+
+      # What an earlier case's 429 leaves behind, then the per-case reset.
+      governor.protocol_rejected(30)
+      assert %{retry_after_until: %DateTime{}} = governor.diagnostics()
+      restart_capacity_governor()
+
+      held = fill_admitted_capacity(governor, operation)
+      assert length(held) == governor.diagnostics().admitted_capacity
+      Enum.each(held, &governor.complete(&1, :not_dispatched))
     end
   end
 
