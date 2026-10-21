@@ -14,4 +14,7 @@ if ! command -v mix >/dev/null 2>&1; then
   exit 2
 fi
 
+# Idempotent: every checkout gets the pre-push format guard.
+git config core.hooksPath .githooks 2>/dev/null || true
+
 exec env MIX_ENV=test mix verify

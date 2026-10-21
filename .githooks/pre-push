@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Blocks a push whose tree fails CI's format check. Installed by scripts/verify
+# (core.hooksPath=.githooks). Bypass once with `git push --no-verify`.
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+if ! command -v mix >/dev/null 2>&1; then
+  echo "pre-push: mix not on PATH; skipping format check" >&2
+  exit 0
+fi
+if ! mix format --check-formatted >/dev/null 2>&1; then
+  echo "pre-push: unformatted files; run \`mix format\` and commit:" >&2
+  mix format --check-formatted 2>&1 | grep -E '^\S.*\.(ex|exs|heex)' >&2 || true
+  exit 1
+fi
