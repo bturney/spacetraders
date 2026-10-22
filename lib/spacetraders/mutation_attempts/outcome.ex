@@ -10,6 +10,10 @@ defmodule SpaceTraders.MutationAttempts.Outcome do
 
     belongs_to :mutation_attempt, SpaceTraders.MutationAttempts.Attempt, type: :binary_id
 
-    timestamps(type: :utc_datetime_usec, updated_at: false)
+    timestamps(
+      type: :utc_datetime_usec,
+      updated_at: false,
+      autogenerate: {SpaceTraders.Clock, :timestamp, [:microsecond]}
+    )
   end
 end
