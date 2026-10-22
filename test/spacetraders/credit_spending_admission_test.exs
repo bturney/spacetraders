@@ -162,6 +162,66 @@ defmodule SpaceTraders.CreditSpendingAdmissionTest do
     assert {:ok, %{state: "sent_or_unknown"}} = RecordedAction.admit_send(attempt)
   end
 
+  test "a same-tick post-effect balance does not charge its exact settled purchase twice" do
+    {agent, [first, second], _portfolio} = claimed_purchases([0, 0])
+    stub_quote(agent, 10, 1_126)
+    assert {:ok, %{attempt: one}} = RecordedAction.prepare(agent, first, buy())
+    TestClock.advance(1)
+
+    Req.Test.stub(API, fn conn ->
+      assert {conn.method, conn.request_path} == {"POST", "/v2/my/ships/BUYER-0/purchase"}
+
+      Req.Test.json(conn, %{
+        "data" => %{
+          "agent" => %{
+            "symbol" => agent.symbol,
+            "credits" => 1_076,
+            "accountId" => "TEST",
+            "headquarters" => agent.headquarters,
+            "startingFaction" => "COSMIC",
+            "shipCount" => 2
+          },
+          "cargo" => %{
+            "capacity" => 40,
+            "units" => 5,
+            "inventory" => [
+              %{
+                "symbol" => "IRON_ORE",
+                "name" => "Iron Ore",
+                "description" => "Ore",
+                "units" => 5
+              }
+            ]
+          },
+          "transaction" => %{
+            "shipSymbol" => "BUYER-0",
+            "waypointSymbol" => agent.headquarters,
+            "tradeSymbol" => "IRON_ORE",
+            "type" => "PURCHASE",
+            "units" => 5,
+            "pricePerUnit" => 10,
+            "totalPrice" => 50,
+            "timestamp" => DateTime.to_iso8601(SpaceTraders.Clock.utc_now())
+          }
+        }
+      })
+    end)
+
+    assert {:ok, response} = API.dispatch_recorded(one)
+    one = MutationAttempts.get!(one.id)
+    assert {:ok, _} = Evidence.retain_mutation_response(agent, one, response)
+    assert {:ok, balance} = SpaceTraders.CreditSpending.authoritative_credits(agent)
+    assert balance.observation.observed_at == one.updated_at
+    assert balance.observation.facts["mutation_response"]["mutation_attempt_id"] == one.id
+    assert balance.value.credits == 1_076
+
+    stub_quote(agent, 10, 1_076)
+    assert {:ok, %{attempt: two}} = RecordedAction.prepare(agent, second, buy())
+    # 1,076 post-purchase credits - 63 new exposure >= the unchanged 1,000 floor.
+    # The old 63 bound cannot be deducted again: this exact balance includes it.
+    assert {:ok, %{state: "sent_or_unknown"}} = RecordedAction.admit_send(two)
+  end
+
   test "a different active Fleet Reservation protects headroom even when this Ship arrives first" do
     {agent, [intent | _], _portfolio} = claimed_purchases([63, 50])
     stub_quote(agent, 10, 1_100)

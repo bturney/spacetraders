@@ -477,15 +477,19 @@ defmodule SpaceTraders.CreditSpending do
   defp acquire_credits(agent) do
     case authoritative_credits(agent) do
       {:ok, binding} ->
-        if Repo.exists?(
-             from a in Attempt,
-               where:
-                 a.agent_id == ^agent.id and a.operation_id in ^@credit_operations and
-                   a.state in ["succeeded", "accepted"] and
-                   a.updated_at >= ^binding.observation.observed_at
-           ),
-           do: Evidence.get_agent_binding(agent, owner: "ship_execution"),
-           else: {:ok, binding}
+        refresh? =
+          Repo.all(
+            from a in Attempt,
+              where:
+                a.agent_id == ^agent.id and a.operation_id in ^@credit_operations and
+                  a.state in ["succeeded", "accepted"] and
+                  a.updated_at >= ^binding.observation.observed_at
+          )
+          |> Enum.any?(&(not balance_includes_effect?(&1, binding.observation)))
+
+        if refresh?,
+          do: Evidence.get_agent_binding(agent, owner: "ship_execution"),
+          else: {:ok, binding}
 
       _ ->
         Evidence.get_agent_binding(agent, owner: "ship_execution")
@@ -571,6 +575,7 @@ defmodule SpaceTraders.CreditSpending do
                  (a.state in ["succeeded", "accepted"] and
                     a.updated_at >= ^balance_source.observed_at))
       )
+      |> Enum.reject(&balance_includes_effect?(&1, balance_source))
 
     Enum.reduce_while(attempts, {:ok, %{}}, fn a, {:ok, exposures} ->
       case get_in(a.prepared_evidence, ["spending", "worst_case_exposure"]) do
@@ -593,6 +598,19 @@ defmodule SpaceTraders.CreditSpending do
         error
     end
   end
+
+  # A delivered mutation response carries its own authoritative post-effect
+  # balance. Its exact confirmed charge is already included even if clock times
+  # tie; no other settled or unresolved exposure can borrow this provenance.
+  defp balance_includes_effect?(%Attempt{state: "succeeded"} = attempt, source) do
+    source.agent_id == attempt.agent_id and
+      source.fleet_generation_id == attempt.fleet_generation_id and
+      source.operation_id == "get-my-agent" and
+      get_in(source.facts, ["mutation_response", "mutation_attempt_id"]) == attempt.id and
+      get_in(source.facts, ["mutation_response", "operation_id"]) == attempt.operation_id
+  end
+
+  defp balance_includes_effect?(_attempt, _source), do: false
 
   defp system_of(waypoint), do: waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
 end
