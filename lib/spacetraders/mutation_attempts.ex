@@ -304,7 +304,7 @@ defmodule SpaceTraders.MutationAttempts do
       [attempt],
       attempt.operation_id == "register" and attempt.operator_id == ^operator_id
     )
-    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
+    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.sequence)
     |> limit(1)
     |> preload(:outcomes)
     |> Repo.one()
@@ -463,7 +463,7 @@ defmodule SpaceTraders.MutationAttempts do
     |> where([attempt], attempt.state in ^states)
     |> where([attempt], fragment("? @> ?", attempt.provenance, ^provenance))
     |> linked_attempt(intent.mutation_attempt_id)
-    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
+    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.sequence)
     |> limit(1)
     |> Repo.one()
     |> case do
@@ -786,7 +786,7 @@ defmodule SpaceTraders.MutationAttempts do
 
   defp list(query) do
     query
-    |> order_by([attempt], asc: attempt.prepared_at, asc: attempt.id)
+    |> order_by([attempt], asc: attempt.prepared_at, asc: attempt.sequence)
     |> preload(:outcomes)
     |> Repo.all()
   end
