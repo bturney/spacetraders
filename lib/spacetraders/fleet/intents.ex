@@ -1499,7 +1499,8 @@ defmodule SpaceTraders.Fleet.Intents do
             :shipyard ->
               Evidence.get_shipyard(reference, system, intent.target_waypoint,
                 owner: "ship_execution",
-                required_facts: intent.parameters["required_facts"]
+                required_facts: intent.parameters["required_facts"],
+                bind: true
               )
           end
 
