@@ -31,18 +31,27 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
       now = Clock.utc_now()
       work = FleetAllocation.ship_bound_unmet_work(agent, now)
 
-      cond do
-        open ->
-          refuse(agent, revision, generation, :acquisition_already_unsettled, [], work)
+      with :ok <-
+             SpaceTraders.FleetIntelligence.sync_acquisition_observation_demands(
+               agent,
+               revision,
+               system,
+               work,
+               now
+             ) do
+        cond do
+          open ->
+            refuse(agent, revision, generation, :acquisition_already_unsettled, [], work)
 
-        work == [] ->
-          refuse(agent, revision, generation, :no_claim_only_loser, [], work)
+          work == [] ->
+            refuse(agent, revision, generation, :no_claim_only_loser, [], work)
 
-        not enabled_work_proceeds?(capacity, work) ->
-          refuse(agent, revision, generation, :capacity_not_proceed, [], work)
+          not enabled_work_proceeds?(capacity, work) ->
+            refuse(agent, revision, generation, :capacity_not_proceed, [], work)
 
-        true ->
-          plan_and_publish(scope, agent, revision, generation, system, now, work)
+          true ->
+            plan_and_publish(scope, agent, revision, generation, system, now, work)
+        end
       end
     end
   end
@@ -254,6 +263,13 @@ defmodule SpaceTraders.FleetAllocation.Acquisition do
           domain: "ship_acquisition",
           limitations: limitations,
           considered_work: work,
+          observation_demands:
+            agent
+            |> Evidence.list_open_demands()
+            |> Enum.filter(
+              &(&1.owner == "fleet_acquisition" and &1.strategy_revision_id == revision.id)
+            )
+            |> Enum.map(&%{id: &1.id, subject: &1.subject}),
           calibration: SpaceTraders.ShipAcquisitionCalibration.current(),
           horizon_read_at: read_at
         }),

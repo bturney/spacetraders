@@ -30,7 +30,7 @@ defmodule SpaceTraders.Evidence do
   @waypoint_facts ~w(symbol system_symbol type x y orbits orbitals traits modifiers chart faction is_under_construction)
   @construction_facts ~w(symbol is_complete materials)
   @jump_gate_facts ~w(symbol connections)
-  @shipyard_facts ~w(symbol ship_types transactions)
+  @shipyard_facts ~w(symbol ship_types ships modifications_fee transactions)
   @system_facts ~w(symbol sector type x y waypoints)
   @market_required_facts ~w(exports imports exchange)
   @waypoint_required_facts ~w(symbol system_symbol type traits)
