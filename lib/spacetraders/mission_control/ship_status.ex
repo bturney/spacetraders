@@ -18,9 +18,11 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
       earnings not below that bar, 3 or more skipped buys in 30 minutes: a
       planned trade was refused (usually a price move), a price or planning
       issue, not a failure to earn (#816);
-    * `:trading` - a trade assignment, with the leg in progress;
-    * `:scouting` - a Market-refresh assignment, with markets it refreshed
-      and the Agent's overdue Markets.
+    * `:trading` - trade work, with the leg in progress;
+    * `:scouting` - Market-refresh work, with markets it refreshed and the
+      Agent's overdue Markets. This is a coverage assignment, an
+      `acquire_intelligence` step, or any assignment to a Ship that cannot
+      hold cargo: a probe never trades (#814).
 
   A skipped buy is a buy step that ended infeasible. Net Earnings and the
   credits-per-Ship-hour rate come from the Ship's Earnings records in the
@@ -101,7 +103,12 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     assignments = assignments(portfolio)
     ship_ids = Enum.map(ships, & &1.id)
     symbols = Enum.map(ships, & &1.symbol)
-    scouting? = Enum.any?(symbols, &match?(%{coverage?: true}, assignments[&1]))
+    intents = intents(ship_ids)
+
+    scouting_ship_ids =
+      for ship <- ships,
+          scouting_work?(assignments[ship.symbol], intents[ship.id], ship),
+          do: ship.id
 
     thresholds =
       Map.take(PlanHealth.thresholds(), ~w(earning_ratio hour_seconds average_window_seconds)a)
@@ -109,13 +116,17 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
     %{
       thresholds: thresholds,
       assignments: assignments,
-      intents: intents(ship_ids),
+      intents: intents,
       neutral_wait: generation && neutral_wait(generation),
       stall: generation && stall(generation, portfolio),
       skipped: skipped_buys(ship_ids, now),
       earnings: earnings(generation, symbols, now, thresholds),
-      refreshed: if(scouting?, do: refreshed(ship_ids, now, thresholds.hour_seconds), else: %{}),
-      overdue: if(scouting?, do: overdue_markets(agent, now), else: 0)
+      refreshed:
+        if(scouting_ship_ids == [],
+          do: %{},
+          else: refreshed(scouting_ship_ids, now, thresholds.hour_seconds)
+        ),
+      overdue: if(scouting_ship_ids == [], do: 0, else: overdue_markets(agent, now))
     }
   end
 
@@ -387,10 +398,25 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
 
   defp skip_last(_last), do: ""
 
+  defp working(nil, %Intent{type: "acquire_intelligence"}, ship, facts),
+    do: scouting(ship, facts)
+
   defp working(nil, _intent, _ship, _facts),
     do: {:waiting, %{phrase: "Waiting for new orders"}}
 
-  defp working(%{coverage?: true}, _intent, ship, facts) do
+  defp working(assignment, intent, ship, facts) do
+    if scouting_work?(assignment, intent, ship) do
+      scouting(ship, facts)
+    else
+      {:trading,
+       %{
+         estimate: assignment.expected_value && round(assignment.expected_value),
+         phrase: leg(intent)
+       }}
+    end
+  end
+
+  defp scouting(ship, facts) do
     refreshed = Map.get(facts.refreshed, ship.id, 0)
 
     {:scouting,
@@ -402,13 +428,26 @@ defmodule SpaceTraders.MissionControl.ShipStatus do
      }}
   end
 
-  defp working(assignment, intent, _ship, _facts) do
-    {:trading,
-     %{
-       estimate: assignment.expected_value && round(assignment.expected_value),
-       phrase: leg(intent)
-     }}
+  # Work in flight decides the status (#814): Market-refresh work is Scouting,
+  # and only cargo-capable trade work is Trading. A coverage Commitment is
+  # Market-refresh work; an `acquire_intelligence` step is too even when its
+  # Commitment has no unfulfilled Market dependency; and a Ship without a hold
+  # can only scout, whatever its assignment claims.
+  defp scouting_work?(nil, nil, _ship), do: false
+
+  defp scouting_work?(nil, intent, _ship),
+    do: match?(%Intent{type: "acquire_intelligence"}, intent)
+
+  defp scouting_work?(assignment, intent, ship) do
+    match?(%{coverage?: true}, assignment) or
+      match?(%Intent{type: "acquire_intelligence"}, intent) or
+      not cargo_capable?(ship)
   end
+
+  # An unobserved capacity is unknown, not zero: only a stored zero (or less)
+  # is proof the Ship cannot hold cargo.
+  defp cargo_capable?(%{cargo_capacity: capacity}) when is_integer(capacity), do: capacity > 0
+  defp cargo_capable?(_ship), do: true
 
   defp leg(%Intent{type: "buy"} = intent),
     do:

@@ -87,6 +87,42 @@ defmodule SpaceTraders.MissionControl.ShipStatusTest do
     assert status.phrase == "Refreshing markets: 2 refreshed in the last hour, 3 overdue"
   end
 
+  test "a zero-cargo Ship scouting without a Market dependency is Scouting (#814)", ctx do
+    Repo.update!(Ecto.Changeset.change(ctx.ship, cargo_capacity: 0))
+
+    scouting = ctx.intent |> Ecto.Changeset.change(type: "acquire_intelligence") |> Repo.update!()
+
+    for minutes_ago <- [5, 40] do
+      Repo.insert!(%{
+        scouting
+        | id: nil,
+          fleet_commitment_id: nil,
+          status: "completed",
+          finished_at: DateTime.add(ctx.now, -minutes_ago * 60)
+      })
+    end
+
+    overdue_demands(ctx, 3)
+
+    status = status(ctx)
+    assert status.kind == :scouting
+    assert status.markets_refreshed == 2
+    assert status.markets_overdue == 3
+    assert status.phrase == "Refreshing markets: 2 refreshed in the last hour, 3 overdue"
+  end
+
+  test "a zero-cargo Ship is never Trading, even on a dependency-free assignment", ctx do
+    Repo.update!(Ecto.Changeset.change(ctx.ship, cargo_capacity: 0))
+
+    assert %{kind: :scouting} = status(ctx)
+  end
+
+  test "a cargo-capable Ship on a dependency-free assignment is Trading", ctx do
+    Repo.update!(Ecto.Changeset.change(ctx.ship, cargo_capacity: 40))
+
+    assert %{kind: :trading} = status(ctx)
+  end
+
   test "an unassigned Ship during a Neutral Wait is Waiting on purpose until the next check",
        ctx do
     next = usec(DateTime.add(ctx.now, 600))
