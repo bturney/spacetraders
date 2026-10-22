@@ -265,6 +265,38 @@ defmodule SpaceTraders.ShipyardProofRuntime do
     end
   end
 
+  @doc "Processes actual scheduled events until this Ship's pending arrival settles."
+  def next_arrival(symbol) do
+    settle_ships()
+
+    case Enum.filter(
+           SpaceTraders.Timeline.pending_events(:ship, symbol),
+           &(&1.event_type == "arrival")
+         ) do
+      [arrival] -> await_arrival(arrival)
+      events -> raise "expected one pending arrival for #{symbol}, got #{inspect(events)}"
+    end
+  end
+
+  defp await_arrival(arrival) do
+    if SpaceTraders.Timeline.pending?(arrival) do
+      case TestClock.next_due_at() do
+        %DateTime{} = due_at ->
+          if DateTime.compare(due_at, DateTime.add(@t0, 48, :hour)) == :gt,
+            do: raise("proof arrival did not settle within its 48-hour window")
+
+          next_event()
+          settle_ships()
+          await_arrival(arrival)
+
+        nil ->
+          raise "proof arrival is pending without a scheduled event"
+      end
+    else
+      :ok
+    end
+  end
+
   def settle_ships do
     for symbol <- ~w(PROOF824-1 PROOF824-2),
         {pid, _} <- Registry.lookup(SpaceTraders.Fleet.ShipRegistry, symbol) do
