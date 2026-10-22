@@ -36,6 +36,9 @@ defmodule SpaceTraders.MutationAttempts.Attempt do
       foreign_key: :mutation_attempt_id,
       preload_order: [asc: :recorded_at, asc: :id]
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(
+      type: :utc_datetime_usec,
+      autogenerate: {SpaceTraders.Clock, :timestamp, [:microsecond]}
+    )
   end
 end

@@ -12,6 +12,11 @@ defmodule SpaceTraders.Clock do
     end
   end
 
+  @doc "Application time with the precision required by a persisted timestamp."
+  @spec timestamp(:second | :microsecond) :: DateTime.t()
+  def timestamp(:second), do: utc_now() |> DateTime.truncate(:second)
+  def timestamp(:microsecond), do: utc_now() |> DateTime.add(0, :microsecond)
+
   @spec send_at(pid(), term(), DateTime.t()) :: reference()
   def send_at(destination, message, %DateTime{} = due_at) when is_pid(destination) do
     case Application.get_env(:spacetraders, :clock) do
