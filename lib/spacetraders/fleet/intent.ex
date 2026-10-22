@@ -48,7 +48,7 @@ defmodule SpaceTraders.Fleet.Intent do
 
     belongs_to :fleet_commitment_portfolio, SpaceTraders.FleetAllocation.Portfolio
 
-    timestamps(type: :utc_datetime)
+    timestamps(type: :utc_datetime, autogenerate: {SpaceTraders.Clock, :timestamp, [:second]})
   end
 
   def unfinished_states, do: @unfinished_states
