@@ -9,6 +9,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.ShipyardProofWorld, as: World
+  require Ecto.Query
 
   @t0 ~U[2026-10-22 00:00:00Z]
   @system "X1-UX81"
@@ -120,6 +121,271 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       @system,
       SpaceTraders.FleetCapacity.disposition("get-market")
     )
+  end
+
+  @doc "Matched finite control through the existing reconciliation entries, never a policy double."
+  def finite_control(world, fleet, preset, cutoff \\ DateTime.add(@t0, 48, :hour)) do
+    fixture_sources = fixture_sources()
+    World.frozen_debit(world)
+
+    for topic <- ~w(fleet_market_evidence fleet_intelligence_evidence observation_demands),
+        do: Phoenix.PubSub.subscribe(SpaceTraders.PubSub, topic)
+
+    Clock.send_at(self(), :proof_cutoff, cutoff)
+    Clock.send_at(self(), :proof_world_tick, DateTime.add(@t0, 1800))
+    first = run(fn -> control_boundary(fleet) end)
+
+    progress =
+      control_events(world, fleet, cutoff, [
+        %{at: Clock.utc_now(), result: boundary_summary(first)}
+      ])
+
+    state = World.snapshot(world)
+    {:ok, floor} = SpaceTraders.FleetExecution.credit_floor(fleet.revision)
+    {code, 0} = System.cmd("git", ["rev-parse", "HEAD"])
+
+    decisions =
+      Repo.all(
+        Ecto.Query.from(e in SpaceTraders.FleetAllocation.StrategyDecisionEpisode,
+          where: e.fleet_generation_id == ^fleet.generation.id,
+          order_by: [asc: e.id]
+        )
+      )
+
+    portfolio = SpaceTraders.FleetAllocation.current_portfolio(fleet.scope, fleet.agent)
+
+    %{
+      ticket: 834,
+      classification: "blocked",
+      limits: [
+        "Frozen external debit is authoritatively accounted but no legitimate disjoint runtime work/effect provenance was established; NOT a funding-safety proof.",
+        "Claim-only loser source-refresh/validity limitation must not be bypassed.",
+        "Controlled finite world only; not acquisition qualification, cash superiority, or Gate 0."
+      ],
+      code_revision: String.trim(code),
+      baseline: "accae0cced7a6d3e866724b0117ddaaaf66d6afc",
+      manifest: manifest(),
+      fixture_sources: fixture_sources,
+      fixture_revision:
+        System.get_env("SHIPYARD_PROOF_FIXTURE_REVISION", "uncommitted; use source hashes"),
+      test_support_overlay: System.get_env("SHIPYARD_PROOF_OVERLAY", "native V support"),
+      preset: preset,
+      floor: floor,
+      agent: fleet.agent.symbol,
+      generation: fleet.generation.id,
+      strategy_revision: fleet.revision.id,
+      t0: @t0,
+      reset_at: state.reset_at,
+      as_of: cutoff,
+      execution_stopped_at: Clock.utc_now(),
+      account: World.account(world, cutoff),
+      stock_at_stop: state.routes,
+      request_effects: state.requests,
+      pending_debit: state.pending_debit,
+      progress: progress,
+      decisions:
+        Enum.map(
+          decisions,
+          &Map.take(
+            &1,
+            ~w(id selection_kind alternatives evidence_references expectations actual_outcomes classification inserted_at)a
+          )
+        ),
+      current_commitments:
+        if(portfolio,
+          do:
+            Enum.map(
+              portfolio.commitments,
+              &Map.take(
+                &1,
+                ~w(id candidate_id claims reservations dependencies expected_value unwind_state)a
+              )
+            ),
+          else: []
+        ),
+      unmet_work_at_stop: SpaceTraders.FleetAllocation.ship_bound_unmet_work(fleet.agent),
+      open_demands:
+        Enum.map(
+          SpaceTraders.Evidence.list_open_demands(fleet.agent),
+          &Map.take(
+            &1,
+            ~w(id subject required_facts freshness_seconds due_at deadline_at deadline_missed_at owner withdrawn_at agent_id strategy_revision_id fulfilled_observation_id replaces_id)a
+          )
+        ),
+      intents:
+        Enum.map(
+          SpaceTraders.Fleet.Intents.history(fleet.agent),
+          &Map.take(
+            &1,
+            ~w(id type status target_waypoint parameters blocker last_action_result in_flight_action mutation_attempt_id fleet_commitment_id)a
+          )
+        ),
+      earnings:
+        Enum.map(
+          SpaceTraders.Outcomes.Earnings.list(fleet.generation.id),
+          &Map.take(
+            &1,
+            ~w(id ship_symbol good units goods_cost revenue fuel_cost other_cost net_earnings expected_value ship_seconds started_at finished_at)a
+          )
+        ),
+      attempts:
+        Enum.map(SpaceTraders.MutationAttempts.list_for_agent(fleet.agent), fn a ->
+          Map.take(
+            a,
+            ~w(id operation_id state prepared_evidence provenance prepared_at sent_or_unknown_at)a
+          )
+          |> Map.put(
+            :outcomes,
+            Enum.map(a.outcomes, &Map.take(&1, ~w(classification recorded_at evidence)a))
+          )
+        end)
+    }
+  end
+
+  def manifest do
+    %{
+      version: "821-finite-control-834-v1",
+      t0: @t0,
+      hours: 48,
+      reset_hours: 120,
+      initial_credits: 400_000,
+      margin_percent: 25,
+      routes: ~w(IRON COPPER),
+      source_units: 1600,
+      demand_units: 1600,
+      transaction_maximum: 40,
+      initial_buy: 1000,
+      initial_sell: 1500,
+      price_change_per_40: 10,
+      replenish_seconds: 1800,
+      replenish_units: 40,
+      service_ms: 1000,
+      offer_stock: 1,
+      ship_price: 100_000,
+      modification_fee: 2000,
+      uncertain_bound: 25_000,
+      independent_debit: 20_000,
+      debit_at_seconds: 3600,
+      debit_runtime_provenance: "NOT ESTABLISHED: blocks canonical protected-funding claim"
+    }
+  end
+
+  defp fixture_sources do
+    Map.new(
+      ~w(test/support/shipyard_proof_world.ex test/support/shipyard_proof_runtime.ex test/support/test_clock.ex test/diagnostics/shipyard_finite_control.exs),
+      fn path ->
+        {path, :crypto.hash(:sha256, File.read!(path)) |> Base.encode16(case: :lower)}
+      end
+    )
+  end
+
+  def write_control_receipt(receipt, preset) do
+    if directory = System.get_env("SHIPYARD_PROOF_RECEIPTS") do
+      File.mkdir_p!(directory)
+
+      File.write!(
+        Path.join(directory, "834-#{preset}.json"),
+        Jason.encode!(receipt, pretty: true)
+      )
+    end
+
+    :ok
+  end
+
+  defp control_boundary(fleet) do
+    market = reconcile(fleet)
+
+    acquisition =
+      SpaceTraders.FleetAllocation.Acquisition.reconcile(
+        fleet.scope,
+        fleet.agent,
+        fleet.revision,
+        @system,
+        nil
+      )
+
+    :ok =
+      SpaceTraders.FleetIntelligence.sync_market_observation_demands(
+        fleet.agent,
+        fleet.revision,
+        @system
+      )
+
+    %{market: market, acquisition: acquisition}
+  end
+
+  defp control_events(world, fleet, cutoff, progress) do
+    settle_ships()
+    # The existing scheduler is the only owner of demand due/retry times.
+    if pid = Process.whereis(SpaceTraders.Evidence.DemandScheduler), do: :sys.get_state(pid)
+
+    if DateTime.compare(Clock.utc_now(), cutoff) != :lt do
+      Enum.reverse(progress)
+    else
+      receive do
+        :proof_cutoff ->
+          Enum.reverse(progress)
+
+        :proof_world_tick ->
+          World.snapshot(world)
+          next = DateTime.add(Clock.utc_now(), 1800)
+
+          if DateTime.compare(next, cutoff) != :gt,
+            do: Clock.send_at(self(), :proof_world_tick, next)
+
+          control_events(world, fleet, cutoff, progress)
+
+        {kind, agent_id, _subject}
+        when kind in [
+               :market_evidence_observed,
+               :waypoint_intelligence_observed,
+               :observation_demand_due
+             ] and agent_id == fleet.agent.id ->
+          result = run(fn -> control_boundary(fleet) end)
+          work = SpaceTraders.FleetAllocation.ship_bound_unmet_work(fleet.agent)
+
+          entry = %{
+            at: Clock.utc_now(),
+            event: kind,
+            result: boundary_summary(result),
+            unmet_work: work
+          }
+
+          if directory = System.get_env("SHIPYARD_PROOF_RECEIPTS") do
+            File.mkdir_p!(directory)
+
+            File.write!(
+              Path.join(directory, "834-progress.jsonl"),
+              Jason.encode!(%{
+                at: entry.at,
+                event: kind,
+                requests: length(World.snapshot(world).requests),
+                unmet_work: length(work)
+              }) <> "\n",
+              [:append]
+            )
+          end
+
+          control_events(world, fleet, cutoff, [entry | progress])
+
+        {:observation_demands_changed, _} ->
+          control_events(world, fleet, cutoff, progress)
+      after
+        0 ->
+          next_event()
+          control_events(world, fleet, cutoff, progress)
+      end
+    end
+  end
+
+  defp boundary_summary(%{market: market, acquisition: acquisition}) do
+    market =
+      case market do
+        {:ok, result} -> Map.take(result, [:action, :reason])
+        other -> inspect(other)
+      end
+
+    %{market: market, acquisition: inspect(acquisition, limit: 10)}
   end
 
   @doc "Optionally retain the complete effect trace outside the test database."
@@ -266,7 +532,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
   end
 
   def settle_ships do
-    for symbol <- ~w(PROOF824-1 PROOF824-2),
+    for symbol <- ~w(PROOF824-1 PROOF824-2 PROOF824-3),
         {pid, _} <- Registry.lookup(SpaceTraders.Fleet.ShipRegistry, symbol) do
       run(fn ->
         # The first barrier waits for the arrival callback. That callback can

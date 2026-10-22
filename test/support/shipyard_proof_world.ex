@@ -3,9 +3,8 @@ defmodule SpaceTraders.ShipyardProofWorld do
   Bounded #821 transport world. Owns authoritative game facts, never application
   choices, Claims, offers-as-evidence or Earnings. Not a general simulator.
 
-  Only the ordinary trader round trip is established here. #834 owns finite
-  market depletion/replenishment, offer stock and matched controls; these quotes
-  must not be used to extrapolate a long-window or acquisition benefit.
+  Fixed two-route finite stock/depth, one-stock Shipyard and signed effect
+  account. Fixture mechanics only; never a live-game fidelity qualification.
   """
   use Agent
 
@@ -19,27 +18,155 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
   def start_link(_opts) do
     Agent.start_link(fn ->
-      %{
+      initial = %{
         credits: 400_000,
-        low_credits: 400_000,
-        reset_at: DateTime.add(@t0, 120, :hour),
         ships: %{
           "PROOF824-1" => ship("PROOF824-1", :trader),
           "PROOF824-2" => ship("PROOF824-2", :probe)
         },
+        routes: Map.new(~w(IRON COPPER), &{&1, %{source_units: 1600, demand_units: 1600}}),
+        replenished_at: @t0,
+        cargo_basis: %{},
+        offer_stock: 1
+      }
+
+      Map.merge(initial, %{
+        initial: initial,
+        low_credits: 400_000,
+        reset_at: DateTime.add(@t0, 120, :hour),
+        effects: [],
+        pending_debit: nil,
         requests: []
+      })
+    end)
+  end
+
+  def snapshot(world) do
+    Agent.get_and_update(world, fn state ->
+      next = advance(state)
+      {next, next}
+    end)
+  end
+
+  def market(world, symbol), do: market_from(snapshot(world), symbol)
+
+  @doc "The contract's exogenous liability; not an application Reservation or proof of admission."
+  def frozen_debit(world) do
+    Agent.update(world, fn state ->
+      if state.pending_debit, do: raise("proof debit already declared")
+
+      %{
+        state
+        | pending_debit: %{
+            id: "821-frozen-independent-debit",
+            bound: 25_000,
+            actual: 20_000,
+            due_at: DateTime.add(@t0, 1, :hour),
+            settled_at: nil,
+            provenance:
+              "frozen contract external liability; runtime work/effect provenance NOT established"
+          }
       }
     end)
   end
 
-  def snapshot(world), do: Agent.get(world, & &1)
+  def account(world, cutoff) do
+    state = snapshot(world)
 
-  def market(_world, symbol) do
+    effects =
+      state.effects
+      |> Enum.filter(&(DateTime.compare(&1.at, cutoff) != :gt))
+      |> Enum.sort_by(& &1.at, DateTime)
+
+    cash = Enum.sum_by(effects, & &1.signed_cash)
+
+    last =
+      state.requests
+      |> Enum.filter(&(DateTime.compare(&1.completed_at, cutoff) != :gt))
+      |> List.last()
+
+    ships = if last, do: last.after.ships, else: state.initial.ships
+    ships = arrive(%{state | ships: ships}, cutoff).ships
+    cargo_basis = if last, do: last.after.cargo_basis, else: %{}
+
+    outlays = fn suffix ->
+      effects
+      |> Enum.filter(&String.ends_with?(&1.path, suffix))
+      |> Enum.sum_by(&max(-&1.signed_cash, 0))
+    end
+
+    debit = state.pending_debit
+    last_at = if last, do: last.completed_at, else: @t0
+    observed_credits = if last, do: last.after.credits, else: 400_000
+
+    observed_credits =
+      if debit && DateTime.compare(last_at, debit.due_at) == :lt &&
+           DateTime.compare(cutoff, debit.due_at) != :lt,
+         do: observed_credits - debit.actual,
+         else: observed_credits
+
+    cutoff_state = Map.merge(state, if(last, do: last.after, else: state.initial))
+    cutoff_state = advance(cutoff_state, cutoff)
+
+    %{
+      credits: observed_credits,
+      net_cash: cash,
+      receipts: Enum.sum_by(effects, &max(&1.signed_cash, 0)),
+      all_outlays: Enum.sum_by(effects, &max(-&1.signed_cash, 0)),
+      goods_outlays: outlays.("/purchase"),
+      fuel_outlays: outlays.("/refuel"),
+      acquisition_outlays: outlays.("/my/ships"),
+      debit_outlays: outlays.("/external-debit"),
+      uncertain_debit_bound:
+        if(debit && DateTime.compare(cutoff, debit.due_at) == :lt, do: debit.bound, else: 0),
+      unknown_monetary_effects: [],
+      unexplained_cash: observed_credits - 400_000 - cash,
+      low_credits:
+        effects
+        |> Enum.map_reduce(400_000, fn e, credits ->
+          {credits + e.signed_cash, credits + e.signed_cash}
+        end)
+        |> elem(0)
+        |> Enum.min(fn -> 400_000 end),
+      ships: ships,
+      cargo_basis: cargo_basis,
+      stock: cutoff_state.routes,
+      fuel: Map.new(ships, fn {symbol, ship} -> {symbol, ship["fuel"]} end),
+      open_travel:
+        for(
+          {symbol, ship} <- ships,
+          ship["nav"]["status"] == "IN_TRANSIT",
+          do: %{ship: symbol, route: ship["nav"]["route"]}
+        ),
+      effects: effects,
+      closure_tail: Enum.filter(state.effects, &(DateTime.compare(&1.at, cutoff) == :gt))
+    }
+  end
+
+  defp market_from(state, symbol) do
+    listing = fn trade, type, buy, sell, side ->
+      units = state.routes[trade][side]
+      # Quotes are integer API credits. Retain exact unit depletion; round the
+      # fractional credit against the trader, without compounding rounding.
+      movement = div(1600 - units + 3, 4)
+      buy = if type == "EXPORT", do: buy + movement, else: buy
+      sell = if type == "IMPORT", do: sell - movement, else: sell
+      Map.put(good(trade, type, buy, sell), "tradeVolume", min(40, units))
+    end
+
     goods =
       case symbol do
-        @source -> [good("IRON", "EXPORT", 1000, 900), good("COPPER", "EXPORT", 1000, 900)]
-        "X1-UX81-A2" -> [good("IRON", "IMPORT", 1600, 1500)]
-        "X1-UX81-A3" -> [good("COPPER", "IMPORT", 1600, 1500)]
+        @source ->
+          [
+            listing.("IRON", "EXPORT", 1000, 900, :source_units),
+            listing.("COPPER", "EXPORT", 1000, 900, :source_units)
+          ]
+
+        "X1-UX81-A2" ->
+          [listing.("IRON", "IMPORT", 1600, 1500, :demand_units)]
+
+        "X1-UX81-A3" ->
+          [listing.("COPPER", "IMPORT", 1600, 1500, :demand_units)]
       end ++ [good("FUEL", "EXCHANGE", 100, 90)]
 
     of_type = fn type ->
@@ -76,7 +203,7 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
     result =
       Agent.get_and_update(world, fn state ->
-        state = arrive(state)
+        state = advance(state)
 
         receipt = %{
           method: conn.method,
@@ -84,7 +211,15 @@ defmodule SpaceTraders.ShipyardProofWorld do
           body: conn.body_params,
           started_at: started_at,
           completed_at: Clock.utc_now(),
-          before: Map.take(state, [:credits, :ships])
+          before:
+            Map.take(state, [
+              :credits,
+              :ships,
+              :routes,
+              :cargo_basis,
+              :offer_stock,
+              :replenished_at
+            ])
         }
 
         try do
@@ -92,7 +227,28 @@ defmodule SpaceTraders.ShipyardProofWorld do
             respond(state, conn.method, conn.request_path, conn.body_params)
 
           receipt =
-            Map.merge(receipt, %{response: response, after: Map.take(next, [:credits, :ships])})
+            Map.merge(receipt, %{
+              response: response,
+              signed_cash: next.credits - state.credits,
+              after:
+                Map.take(next, [
+                  :credits,
+                  :ships,
+                  :routes,
+                  :cargo_basis,
+                  :offer_stock,
+                  :replenished_at
+                ])
+            })
+
+          effect = %{
+            at: Clock.utc_now(),
+            path: conn.request_path,
+            body: conn.body_params,
+            signed_cash: next.credits - state.credits
+          }
+
+          next = %{next | effects: state.effects ++ [effect]}
 
           {{:ok, response, meta},
            %{
@@ -130,7 +286,8 @@ defmodule SpaceTraders.ShipyardProofWorld do
   defp respond(state, "GET", "/v2/my/contracts", _), do: {[], meta(0), state}
 
   defp respond(state, "GET", "/v2/my/ships", _) do
-    {state.ships |> Map.values() |> Enum.sort_by(& &1["symbol"]), meta(2), state}
+    {state.ships |> Map.values() |> Enum.sort_by(& &1["symbol"]), meta(map_size(state.ships)),
+     state}
   end
 
   defp respond(state, "GET", "/v2/my/ships/" <> symbol, _),
@@ -146,7 +303,7 @@ defmodule SpaceTraders.ShipyardProofWorld do
         {waypoint(symbol), nil, state}
 
       [symbol, "market"] ->
-        market = market(nil, symbol)
+        market = market_from(state, symbol)
 
         market =
           if present?(state, symbol),
@@ -155,9 +312,46 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
         {market, nil, state}
 
+      [@source, "shipyard"] ->
+        yard = %{
+          "symbol" => @source,
+          "shipTypes" => [%{"type" => "SHIP_LIGHT_HAULER"}],
+          "modificationsFee" => 2000
+        }
+
+        yard = if present?(state, @source), do: Map.put(yard, "ships", offers(state)), else: yard
+        {yard, nil, state}
+
       _ ->
         raise "unsupported proof observation #{rest}"
     end
+  end
+
+  defp respond(
+         state,
+         "POST",
+         "/v2/my/ships",
+         %{"shipType" => "SHIP_LIGHT_HAULER", "waypointSymbol" => @source} = body
+       )
+       when map_size(body) == 2 do
+    unless present?(state, @source), do: raise("proof Ship purchase requires presence")
+    if state.offer_stock == 0, do: raise("proof Ship Offer exhausted")
+    if state.credits < 100_000, do: raise("proof Ship purchase exceeds credits")
+    acquired = ship("PROOF824-3", :trader)
+    state = put_ship(%{state | credits: state.credits - 100_000, offer_stock: 0}, acquired)
+
+    {%{
+       "ship" => acquired,
+       "agent" => agent_json(state),
+       "transaction" => %{
+         "agentSymbol" => "PROOF824",
+         "shipSymbol" => acquired["symbol"],
+         "shipType" => "SHIP_LIGHT_HAULER",
+         "waypointSymbol" => @source,
+         "price" => 100_000,
+         "timestamp" => stamp(Clock.utc_now())
+       }
+     }, nil, state}
   end
 
   defp respond(state, "POST", "/v2/my/ships/" <> rest, body) do
@@ -240,7 +434,7 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
     listing =
       Enum.find(
-        market(nil, ship["nav"]["waypointSymbol"])["tradeGoods"],
+        market_from(state, ship["nav"]["waypointSymbol"])["tradeGoods"],
         &(&1["symbol"] == trade)
       ) || raise("proof good not listed")
 
@@ -282,6 +476,23 @@ defmodule SpaceTraders.ShipyardProofWorld do
     cargo = %{ship["cargo"] | "units" => ship["cargo"]["units"] + delta, "inventory" => inventory}
     next = Map.put(ship, "cargo", cargo)
     state = put_ship(%{state | credits: credits}, next)
+    side = if action == "purchase", do: :source_units, else: :demand_units
+    state = update_in(state, [:routes, trade, side], &(&1 - units))
+    basis = get_in(state.cargo_basis, [ship["symbol"], trade]) || 0
+
+    remaining_basis =
+      if action == "purchase", do: basis + units * price, else: div(basis * (held - units), held)
+
+    state = %{
+      state
+      | cargo_basis:
+          Map.update(
+            state.cargo_basis,
+            ship["symbol"],
+            %{trade => remaining_basis},
+            &Map.put(&1, trade, remaining_basis)
+          )
+    }
 
     {%{
        "agent" => agent_json(state),
@@ -298,6 +509,22 @@ defmodule SpaceTraders.ShipyardProofWorld do
   end
 
   defp action(_state, _ship, action, _), do: raise("unsupported proof action #{action}")
+
+  defp offers(%{offer_stock: 0}), do: []
+
+  defp offers(_state) do
+    [
+      Map.merge(
+        Map.take(ship("PROOF824-3", :trader), ~w(frame reactor engine modules mounts crew)),
+        %{
+          "type" => "SHIP_LIGHT_HAULER",
+          "name" => "Proof light hauler",
+          "description" => "Controlled ready trader",
+          "purchasePrice" => 100_000
+        }
+      )
+    ]
+  end
 
   defp put_ship(state, ship), do: put_in(state, [:ships, ship["symbol"]], ship)
   defp meta(total), do: %{"total" => total, "page" => 1, "limit" => 20}
@@ -334,19 +561,55 @@ defmodule SpaceTraders.ShipyardProofWorld do
         ship["nav"]["waypointSymbol"] == waypoint and ship["nav"]["status"] != "IN_TRANSIT"
       end)
 
-  defp arrive(state) do
+  defp arrive(state, now) do
     ships =
       Map.new(state.ships, fn {symbol, ship} ->
         {:ok, arrival, 0} = DateTime.from_iso8601(ship["nav"]["route"]["arrival"])
 
         if ship["nav"]["status"] == "IN_TRANSIT" and
-             DateTime.compare(Clock.utc_now(), arrival) != :lt,
+             DateTime.compare(now, arrival) != :lt,
            do: {symbol, put_in(ship, ["nav", "status"], "IN_ORBIT")},
            else: {symbol, ship}
       end)
 
     %{state | ships: ships}
   end
+
+  defp advance(state, now \\ Clock.utc_now()) do
+    periods = div(DateTime.diff(now, state.replenished_at), 1800)
+
+    routes =
+      Map.new(state.routes, fn {trade, route} ->
+        {trade, Map.new(route, fn {side, units} -> {side, min(1600, units + periods * 40)} end)}
+      end)
+
+    %{state | routes: routes, replenished_at: DateTime.add(state.replenished_at, periods * 1800)}
+    |> settle_debit(now)
+    |> arrive(now)
+  end
+
+  defp settle_debit(%{pending_debit: %{settled_at: nil} = debit} = state, now) do
+    if DateTime.compare(now, debit.due_at) != :lt do
+      effect = %{
+        at: debit.due_at,
+        path: "/fixture/external-debit",
+        body: %{id: debit.id},
+        signed_cash: -debit.actual
+      }
+
+      %{
+        state
+        | credits: state.credits - debit.actual,
+          low_credits: min(state.low_credits, state.credits - debit.actual),
+          pending_debit: %{debit | settled_at: debit.due_at},
+          effects: state.effects ++ [effect]
+      }
+    else
+      state
+    end
+  end
+
+  defp settle_debit(state, _now), do: state
 
   def waypoint(symbol) do
     {x, y} = Map.fetch!(@coordinates, symbol)

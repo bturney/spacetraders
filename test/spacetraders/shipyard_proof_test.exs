@@ -37,6 +37,7 @@ defmodule SpaceTraders.ShipyardProofTest do
     on_exit(fn ->
       SpaceTraders.Quiesced.stop_ship("PROOF824-1")
       SpaceTraders.Quiesced.stop_ship("PROOF824-2")
+      SpaceTraders.Quiesced.stop_ship("PROOF824-3")
       restore(:clock, previous_clock)
       restart_governor()
     end)
@@ -238,6 +239,41 @@ defmodule SpaceTraders.ShipyardProofTest do
     end
   end
 
+  test "the finite control prefix retains actual work and settles its external debit once" do
+    # The exact 48h replay is opt-in: test/diagnostics/shipyard_finite_control.exs.
+    preset = System.get_env("SHIPYARD_PROOF_PRESET", "steady_growth")
+    world = start_supervised!({World, []})
+    controller = self()
+    Req.Test.stub(SpaceTraders.API, fn conn -> World.reply(world, conn, controller) end)
+
+    Req.Test.allow(SpaceTraders.API, self(), fn ->
+      DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
+      |> Enum.map(fn {_, pid, _, _} -> pid end)
+    end)
+
+    fleet = Runtime.fresh_generation(world, preset)
+    start_supervised!(SpaceTraders.Quiesced.child_spec(SpaceTraders.Evidence.DemandScheduler))
+    result = Runtime.finite_control(world, fleet, preset, DateTime.add(@t0, 1, :hour))
+    assert result.as_of == DateTime.add(@t0, 1, :hour)
+    assert result.account.credits == 400_000 + result.account.net_cash
+    assert result.account.receipts > 0
+    assert result.account.goods_outlays > 0
+    assert result.account.fuel_outlays > 0
+    assert result.account.unexplained_cash == 0
+    assert result.account.debit_outlays == 20_000
+    assert result.account.uncertain_debit_bound == 0
+    assert result.floor == if(preset == "steady_growth", do: 50_000, else: 75_000)
+    assert result.account.low_credits >= result.floor
+    assert length(result.decisions) > 0
+
+    assert Enum.any?(result.decisions, fn decision ->
+             Enum.any?(decision.alternatives || [], &(&1["reasons"] == ["claim_conflict"]))
+           end)
+
+    assert result.account.acquisition_outlays == 0 or result.classification == "blocked"
+    Runtime.write_control_receipt(result, preset)
+  end
+
   test "the normal protocol budget waits on the same clock before one second of API service" do
     world = start_supervised!({World, []})
     controller = self()
@@ -283,6 +319,166 @@ defmodule SpaceTraders.ShipyardProofTest do
     assert after_rejection.credits == before.credits
     assert after_rejection.ships == before.ships
     assert [%{failure: "unsupported proof action jettison"}] = after_rejection.requests
+  end
+
+  test "finite shared route stock reprices partial transactions and replenishes only depleted units" do
+    world = start_supervised!({World, []})
+    controller = self()
+
+    request = fn units ->
+      Runtime.run(fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships/PROOF824-1/purchase", %{
+            "symbol" => "IRON",
+            "units" => units
+          }),
+          controller
+        )
+      end)
+    end
+
+    request.(20)
+    assert World.snapshot(world).routes["IRON"].source_units == 1580
+    assert hd(World.market(world, "X1-UX81-A1")["tradeGoods"])["purchasePrice"] == 1005
+    request.(20)
+    assert World.snapshot(world).routes["IRON"].source_units == 1560
+    assert hd(World.market(world, "X1-UX81-A1")["tradeGoods"])["purchasePrice"] == 1010
+    assert World.snapshot(world).routes["COPPER"].source_units == 1600
+    SpaceTraders.TestClock.advance(1798)
+    assert World.snapshot(world).routes["IRON"].source_units == 1600
+    assert hd(World.market(world, "X1-UX81-A1")["tradeGoods"])["purchasePrice"] == 1000
+    SpaceTraders.TestClock.advance(1800)
+    assert World.snapshot(world).routes["IRON"].source_units == 1600
+    assert World.snapshot(world).cargo_basis["PROOF824-1"]["IRON"] == 40_100
+  end
+
+  test "the canonical on-site Ship Offer agrees with its single obtainable ready Ship" do
+    world = start_supervised!({World, []})
+    controller = self()
+    Req.Test.stub(SpaceTraders.API, fn conn -> World.reply(world, conn, controller) end)
+    fleet = Runtime.fresh_generation(world, "steady_growth")
+    refute SpaceTraders.Evidence.latest_observation(fleet.agent, "shipyard:X1-UX81:X1-UX81-A1")
+
+    assert {:ok, yard} =
+             Runtime.run(fn ->
+               SpaceTraders.Evidence.get_shipyard(fleet.agent, "X1-UX81", "X1-UX81-A1")
+             end)
+
+    assert yard.modifications_fee == 2000
+    assert [offer] = yard.ships
+    assert offer.purchase_price == 100_000
+    assert offer.type == "SHIP_LIGHT_HAULER"
+
+    request = fn ->
+      Runtime.run(fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships", %{
+            "shipType" => "SHIP_LIGHT_HAULER",
+            "waypointSymbol" => "X1-UX81-A1"
+          }),
+          controller
+        )
+      end)
+    end
+
+    response = request.() |> Map.fetch!(:resp_body) |> Jason.decode!() |> Map.fetch!("data")
+    acquired = Ship.from_json(response["ship"])
+    assert acquired.cargo.capacity == 40
+    assert acquired.engine == offer.engine
+    assert acquired.frame == offer.frame
+    assert acquired.modules == offer.modules
+    assert World.snapshot(world).credits == 300_000
+    assert World.snapshot(world).offer_stock == 0
+
+    Runtime.run(fn ->
+      assert_raise RuntimeError, "proof Ship Offer exhausted", fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships", %{
+            "shipType" => "SHIP_LIGHT_HAULER",
+            "waypointSymbol" => "X1-UX81-A1"
+          }),
+          controller
+        )
+      end
+    end)
+
+    assert {:ok, %{ships: []}} =
+             Runtime.run(fn ->
+               SpaceTraders.Evidence.get_shipyard(fleet.agent, "X1-UX81", "X1-UX81-A1")
+             end)
+
+    assert World.snapshot(world).credits == 300_000
+
+    for symbol <- ~w(PROOF824-1 PROOF824-3) do
+      Runtime.run(fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships/#{symbol}/purchase", %{
+            "symbol" => "IRON",
+            "units" => 40
+          }),
+          controller
+        )
+      end)
+    end
+
+    assert World.snapshot(world).routes["IRON"].source_units == 1520
+    assert World.snapshot(world).credits == 219_600
+    assert World.snapshot(world).cargo_basis["PROOF824-1"]["IRON"] == 40_000
+    assert World.snapshot(world).cargo_basis["PROOF824-3"]["IRON"] == 40_400
+  end
+
+  test "the shared world's transaction maximum rejects over-depth sends without charging" do
+    world = start_supervised!({World, []})
+    controller = self()
+
+    Runtime.run(fn ->
+      assert_raise RuntimeError, "proof transaction exceeds depth", fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships/PROOF824-1/purchase", %{
+            "symbol" => "IRON",
+            "units" => 41
+          }),
+          controller
+        )
+      end
+    end)
+
+    assert World.snapshot(world).credits == 400_000
+    assert World.snapshot(world).routes["IRON"].source_units == 1600
+    assert World.snapshot(world).effects == []
+  end
+
+  test "a service completion after T remains a closure tail, not pre-T cash or Cargo" do
+    world = start_supervised!({World, []})
+    controller = self()
+    cutoff = DateTime.add(@t0, 48, :hour)
+    SpaceTraders.Clock.send_at(self(), :before_cutoff, DateTime.add(cutoff, -500, :millisecond))
+    Runtime.next_event()
+    assert_received :before_cutoff
+
+    Runtime.run(fn ->
+      World.reply(
+        world,
+        Plug.Test.conn(:post, "/v2/my/ships/PROOF824-1/purchase", %{
+          "symbol" => "IRON",
+          "units" => 40
+        }),
+        controller
+      )
+    end)
+
+    account = World.account(world, cutoff)
+    assert account.credits == 400_000
+    assert account.goods_outlays == 0
+    assert account.ships["PROOF824-1"]["cargo"]["units"] == 0
+    assert account.stock["IRON"].source_units == 1600
+    assert account.cargo_basis == %{}
+    assert [%{signed_cash: -40_000}] = account.closure_tail
   end
 
   defp restart_governor do
