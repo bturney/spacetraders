@@ -271,7 +271,18 @@ defmodule SpaceTraders.ShipyardProofTest do
            end)
 
     assert result.account.acquisition_outlays == 0 or result.classification == "blocked"
+    assert Enum.all?(result.earnings, &is_integer(&1.fleet_commitment_id))
+    assert Enum.all?(result.earnings, &is_integer(&1.strategy_decision_episode_id))
+    assert Enum.count(result.waits, &(&1.kind == :service)) == length(result.request_effects)
+    assert [_ | _] = unfinished = SpaceTraders.Fleet.Intents.current(fleet.agent)
+    for intent <- unfinished, do: assert(Enum.any?(result.intents, &(&1.id == intent.id)))
     Runtime.write_control_receipt(result, preset)
+
+    for symbol <- ~w(PROOF824-1 PROOF824-2 PROOF824-3),
+        do: SpaceTraders.Quiesced.stop_ship(symbol)
+
+    assert {:ok, _} = Runtime.cleanup_control_fixture(fleet)
+    refute Repo.get(SpaceTraders.Agent.Agent, fleet.agent.id)
   end
 
   test "the normal protocol budget waits on the same clock before one second of API service" do
@@ -353,6 +364,29 @@ defmodule SpaceTraders.ShipyardProofTest do
     assert World.snapshot(world).cargo_basis["PROOF824-1"]["IRON"] == 40_100
   end
 
+  test "an unrepresentable fractional-credit quote is inconclusive, never silently rounded" do
+    world = start_supervised!({World, []})
+    controller = self()
+
+    Runtime.run(fn ->
+      World.reply(
+        world,
+        Plug.Test.conn(:post, "/v2/my/ships/PROOF824-1/purchase", %{
+          "symbol" => "IRON",
+          "units" => 1
+        }),
+        controller
+      )
+    end)
+
+    assert_raise RuntimeError, "frozen pro-rata quote is not an integer API credit amount", fn ->
+      World.market(world, "X1-UX81-A1")
+    end
+
+    assert World.snapshot(world).credits == 399_000
+    assert World.snapshot(world).routes["IRON"].source_units == 1599
+  end
+
   test "the canonical on-site Ship Offer agrees with its single obtainable ready Ship" do
     world = start_supervised!({World, []})
     controller = self()
@@ -369,6 +403,20 @@ defmodule SpaceTraders.ShipyardProofTest do
     assert [offer] = yard.ships
     assert offer.purchase_price == 100_000
     assert offer.type == "SHIP_LIGHT_HAULER"
+
+    required =
+      File.read!("priv/spec/models/ShipyardShip.json")
+      |> Jason.decode!()
+      |> Map.fetch!("required")
+
+    raw_offer =
+      World.snapshot(world).requests
+      |> List.last()
+      |> Map.fetch!(:response)
+      |> Map.fetch!("ships")
+      |> hd()
+
+    assert Enum.reject(required, &Map.has_key?(raw_offer, &1)) == []
 
     request = fn ->
       Runtime.run(fn ->
@@ -451,6 +499,37 @@ defmodule SpaceTraders.ShipyardProofTest do
     assert World.snapshot(world).credits == 400_000
     assert World.snapshot(world).routes["IRON"].source_units == 1600
     assert World.snapshot(world).effects == []
+  end
+
+  test "status uses the same announced reset and every pinned required response field" do
+    world = start_supervised!({World, []})
+    controller = self()
+    conn = Runtime.run(fn -> World.reply(world, Plug.Test.conn(:get, "/v2/"), controller) end)
+    response = Jason.decode!(conn.resp_body)
+
+    schema =
+      File.read!("priv/spec/SpaceTraders.json")
+      |> Jason.decode!()
+      |> get_in([
+        "paths",
+        "/",
+        "get",
+        "responses",
+        "200",
+        "content",
+        "application/json",
+        "schema"
+      ])
+
+    assert Enum.reject(schema["required"], &Map.has_key?(response, &1)) == []
+
+    assert Enum.reject(
+             schema["properties"]["serverResets"]["required"],
+             &Map.has_key?(response["serverResets"], &1)
+           ) == []
+
+    assert response["serverResets"]["next"] == DateTime.to_iso8601(DateTime.add(@t0, 120, :hour))
+    assert response["resetDate"] == "2026-10-22"
   end
 
   test "a service completion after T remains a closure tail, not pre-T cash or Cargo" do

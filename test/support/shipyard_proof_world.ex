@@ -146,9 +146,13 @@ defmodule SpaceTraders.ShipyardProofWorld do
   defp market_from(state, symbol) do
     listing = fn trade, type, buy, sell, side ->
       units = state.routes[trade][side]
-      # Quotes are integer API credits. Retain exact unit depletion; round the
-      # fractional credit against the trader, without compounding rounding.
-      movement = div(1600 - units + 3, 4)
+      # Canonical 40-unit (and e.g. 20-unit partial) effects are exact. The
+      # frozen 10/40 pro-rata rule can produce quarter credits, whereas the
+      # pinned API requires integers. Do not invent a rounding convention.
+      if rem(1600 - units, 4) != 0,
+        do: raise("frozen pro-rata quote is not an integer API credit amount")
+
+      movement = div(1600 - units, 4)
       buy = if type == "EXPORT", do: buy + movement, else: buy
       sell = if type == "IMPORT", do: sell - movement, else: sell
       Map.put(good(trade, type, buy, sell), "tradeVolume", min(40, units))
@@ -279,7 +283,25 @@ defmodule SpaceTraders.ShipyardProofWorld do
   end
 
   defp respond(state, "GET", "/v2/", _) do
-    {%{"status" => "online", "serverResets" => %{"next" => stamp(state.reset_at)}}, nil, state}
+    {%{
+       "status" => "online",
+       "version" => "2.3.0",
+       "resetDate" => "2026-10-22",
+       "description" => "Bounded #821 controlled world",
+       "stats" => %{
+         "agents" => 1,
+         "ships" => map_size(state.ships),
+         "systems" => 1,
+         "waypoints" => 3
+       },
+       "leaderboards" => %{"mostCredits" => [], "mostSubmittedCharts" => []},
+       "announcements" => [],
+       "links" => [],
+       "serverResets" => %{
+         "next" => stamp(state.reset_at),
+         "frequency" => "120 game hours (controlled fixture)"
+       }
+     }, nil, state}
   end
 
   defp respond(state, "GET", "/v2/my/agent", _), do: {agent_json(state), nil, state}
@@ -518,6 +540,8 @@ defmodule SpaceTraders.ShipyardProofWorld do
         Map.take(ship("PROOF824-3", :trader), ~w(frame reactor engine modules mounts crew)),
         %{
           "type" => "SHIP_LIGHT_HAULER",
+          "symbol" => "SHIP_LIGHT_HAULER",
+          "supply" => "LIMITED",
           "name" => "Proof light hauler",
           "description" => "Controlled ready trader",
           "purchasePrice" => 100_000

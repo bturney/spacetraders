@@ -125,6 +125,16 @@ defmodule SpaceTraders.ShipyardProofRuntime do
 
   @doc "Matched finite control through the existing reconciliation entries, never a policy double."
   def finite_control(world, fleet, preset, cutoff \\ DateTime.add(@t0, 48, :hour)) do
+    Process.put(:proof_captured_waits, [])
+
+    try do
+      do_finite_control(world, fleet, preset, cutoff)
+    after
+      Process.delete(:proof_captured_waits)
+    end
+  end
+
+  defp do_finite_control(world, fleet, preset, cutoff) do
     fixture_sources = fixture_sources()
     World.frozen_debit(world)
 
@@ -169,6 +179,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       fixture_revision:
         System.get_env("SHIPYARD_PROOF_FIXTURE_REVISION", "uncommitted; use source hashes"),
       test_support_overlay: System.get_env("SHIPYARD_PROOF_OVERLAY", "native V support"),
+      repo_pool: inspect(Repo.config()[:pool]),
       preset: preset,
       floor: floor,
       agent: fleet.agent.symbol,
@@ -181,6 +192,12 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       account: World.account(world, cutoff),
       stock_at_stop: state.routes,
       request_effects: state.requests,
+      waits: Process.get(:proof_captured_waits) |> Enum.reverse(),
+      capacity_at_stop:
+        SpaceTraders.API.CapacityGovernor.diagnostics()
+        |> Map.take(
+          ~w(observed_at in_flight deferred retry_after_until outage protocol_rejections scoped_failures)a
+        ),
       pending_debit: state.pending_debit,
       progress: progress,
       decisions:
@@ -212,12 +229,54 @@ defmodule SpaceTraders.ShipyardProofRuntime do
             ~w(id subject required_facts freshness_seconds due_at deadline_at deadline_missed_at owner withdrawn_at agent_id strategy_revision_id fulfilled_observation_id replaces_id)a
           )
         ),
-      intents:
-        Enum.map(
-          SpaceTraders.Fleet.Intents.history(fleet.agent),
+      observations:
+        Repo.all(
+          Ecto.Query.from(o in SpaceTraders.Evidence.Observation,
+            where: o.agent_id == ^fleet.agent.id,
+            order_by: [asc: o.observed_at]
+          )
+        )
+        |> Enum.map(
           &Map.take(
             &1,
-            ~w(id type status target_waypoint parameters blocker last_action_result in_flight_action mutation_attempt_id fleet_commitment_id)a
+            ~w(id subject operation_id dependency_keys facts response_fingerprint observed_at fleet_generation_id agent_id)a
+          )
+        ),
+      all_demands:
+        Repo.all(
+          Ecto.Query.from(d in SpaceTraders.Evidence.ObservationDemand,
+            where: d.agent_id == ^fleet.agent.id,
+            order_by: [asc: d.inserted_at]
+          )
+        )
+        |> Enum.map(
+          &Map.take(
+            &1,
+            ~w(id subject required_facts freshness_seconds due_at deadline_at deadline_missed_at owner withdrawn_at agent_id strategy_revision_id fulfilled_observation_id replaces_id)a
+          )
+        ),
+      all_commitments:
+        Repo.all(
+          Ecto.Query.from(c in SpaceTraders.FleetAllocation.Commitment,
+            join: p in SpaceTraders.FleetAllocation.Portfolio,
+            on: p.id == c.fleet_commitment_portfolio_id,
+            where: p.fleet_generation_id == ^fleet.generation.id,
+            order_by: [asc: c.id]
+          )
+        )
+        |> Enum.map(
+          &Map.take(
+            &1,
+            ~w(id candidate_id fleet_commitment_portfolio_id claims reservations dependencies expected_value unwind_state inserted_at updated_at)a
+          )
+        ),
+      intents:
+        Enum.map(
+          SpaceTraders.Fleet.Intents.current(fleet.agent) ++
+            SpaceTraders.Fleet.Intents.history(fleet.agent),
+          &Map.take(
+            &1,
+            ~w(id ship_id type status target_waypoint parameters blocker last_action_result in_flight_action mutation_attempt_id fleet_commitment_id inserted_at updated_at finished_at)a
           )
         ),
       earnings:
@@ -225,14 +284,14 @@ defmodule SpaceTraders.ShipyardProofRuntime do
           SpaceTraders.Outcomes.Earnings.list(fleet.generation.id),
           &Map.take(
             &1,
-            ~w(id ship_symbol good units goods_cost revenue fuel_cost other_cost net_earnings expected_value ship_seconds started_at finished_at)a
+            ~w(id fleet_commitment_id strategy_decision_episode_id ship_symbol good units goods_cost revenue fuel_cost other_cost net_earnings expected_value ship_seconds started_at finished_at)a
           )
         ),
       attempts:
         Enum.map(SpaceTraders.MutationAttempts.list_for_agent(fleet.agent), fn a ->
           Map.take(
             a,
-            ~w(id operation_id state prepared_evidence provenance prepared_at sent_or_unknown_at)a
+            ~w(id operation_id state prepared_evidence provenance prepared_at sent_or_unknown_at inserted_at updated_at)a
           )
           |> Map.put(
             :outcomes,
@@ -244,7 +303,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
 
   def manifest do
     %{
-      version: "821-finite-control-834-v1",
+      version: "821-finite-control-834-v2",
       t0: @t0,
       hours: 48,
       reset_hours: 120,
@@ -266,7 +325,8 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       uncertain_bound: 25_000,
       independent_debit: 20_000,
       debit_at_seconds: 3600,
-      debit_runtime_provenance: "NOT ESTABLISHED: blocks canonical protected-funding claim"
+      debit_runtime_provenance: "NOT ESTABLISHED: blocks canonical protected-funding claim",
+      fractional_credit_quote: "blocked instead of rounding; canonical 40-unit effects exact"
     }
   end
 
@@ -290,6 +350,42 @@ defmodule SpaceTraders.ShipyardProofRuntime do
     end
 
     :ok
+  end
+
+  @doc "Clean only the committed diagnostic's installation, after owned runtime children stop."
+  def cleanup_control_fixture(fleet) do
+    symbols =
+      Repo.all(
+        Ecto.Query.from(s in SpaceTraders.Fleet.Ship,
+          where: s.agent_id == ^fleet.agent.id,
+          select: s.symbol
+        )
+      )
+
+    Repo.transaction(fn ->
+      Repo.query!(
+        "DELETE FROM mutation_attempt_outcomes WHERE mutation_attempt_id IN (SELECT id FROM mutation_attempts WHERE operator_id = $1)",
+        [fleet.scope.operator.id]
+      )
+
+      for table <- ~w(credit_realizations credit_shortfalls) do
+        Repo.query!("DELETE FROM #{table} WHERE agent_id = $1", [fleet.agent.id])
+      end
+
+      Repo.query!(
+        "DELETE FROM outbox_notifications WHERE payload->>'agent_id' = $1 OR payload->>'fleet_generation_id' = $2",
+        [to_string(fleet.agent.id), to_string(fleet.generation.id)]
+      )
+
+      # The Episode delete trigger updates its pointer. Remove this owned
+      # pointer before cascading the Generation, while its FK is still valid.
+      Repo.query!("DELETE FROM allocation_result_pointers WHERE fleet_generation_id = $1", [
+        fleet.generation.id
+      ])
+
+      SpaceTraders.AgentFixtures.cleanup_operator_fixture(fleet.scope.operator.id)
+      Repo.query!("DELETE FROM timeline_events WHERE owner_id = ANY($1)", [symbols])
+    end)
   end
 
   defp control_boundary(fleet) do
@@ -328,7 +424,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
 
         :proof_world_tick ->
           World.snapshot(world)
-          next = DateTime.add(Clock.utc_now(), 1800)
+          next = DateTime.add(@t0, (div(DateTime.diff(Clock.utc_now(), @t0), 1800) + 1) * 1800)
 
           if DateTime.compare(next, cutoff) != :gt,
             do: Clock.send_at(self(), :proof_world_tick, next)
@@ -490,7 +586,15 @@ defmodule SpaceTraders.ShipyardProofRuntime do
     end
   end
 
-  def run(fun), do: run_trace(fun).result
+  def run(fun) do
+    trace = run_trace(fun)
+
+    if captured = Process.get(:proof_captured_waits) do
+      Process.put(:proof_captured_waits, Enum.reverse(trace.waits, captured))
+    end
+
+    trace.result
+  end
 
   def run_trace(fun) do
     task = Task.async(fun)

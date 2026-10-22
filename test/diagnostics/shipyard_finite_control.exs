@@ -6,14 +6,34 @@ defmodule SpaceTraders.ShipyardFiniteControl do
   alias SpaceTraders.{Clock, Repo, ShipyardProofRuntime, ShipyardProofWorld, TestClock}
 
   def run do
+    if Process.whereis(Repo), do: raise("run this diagnostic with mix run --no-start")
+    previous_repo = Application.fetch_env!(:spacetraders, Repo)
+    leak_baseline = SpaceTraders.FixtureLeakProbe.baseline()
+    # A committed diagnostic is not a long-lived Sandbox owner. The default
+    # Sandbox :auto mode still owns connections until its processes exit.
+    Application.put_env(
+      :spacetraders,
+      Repo,
+      Keyword.put(previous_repo, :pool, DBConnection.ConnectionPool)
+    )
+
+    try do
+      {:ok, _} = Application.ensure_all_started(:spacetraders)
+      replay()
+    after
+      :ok = Application.stop(:spacetraders)
+      Application.put_env(:spacetraders, Repo, previous_repo)
+      {:ok, _} = Application.ensure_all_started(:spacetraders)
+      :ok = Ecto.Adapters.SQL.Sandbox.mode(Repo, :manual)
+      SpaceTraders.FixtureLeakProbe.assert_clean!(leak_baseline, capacity: true)
+    end
+  end
+
+  defp replay do
     preset = System.fetch_env!("SHIPYARD_PROOF_PRESET")
     assert preset in ~w(steady_growth charted_expansion)
     assert is_nil(System.get_env("DATABASE_URL")), "use the checkout's isolated database"
     previous_clock = Application.fetch_env(:spacetraders, :clock)
-    leak_baseline = SpaceTraders.FixtureLeakProbe.baseline()
-    # Committed, checkout-local diagnostic like runtime_qualification.exs.
-    # Do not hold a Sandbox transaction/connection for an entire 48h replay.
-    :ok = Ecto.Adapters.SQL.Sandbox.mode(Repo, :auto)
     {:ok, supervisor} = Supervisor.start_link([], strategy: :one_for_one)
     :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
 
@@ -65,6 +85,7 @@ defmodule SpaceTraders.ShipyardFiniteControl do
       assert result.account.credits == 400_000 + result.account.net_cash
       assert result.account.debit_outlays == 20_000
       assert result.as_of == ~U[2026-10-24 00:00:00Z]
+      assert DateTime.compare(result.execution_stopped_at, result.as_of) != :lt
       refute Enum.any?(result.request_effects, &Map.has_key?(&1, :failure))
 
       IO.inspect(
@@ -98,15 +119,8 @@ defmodule SpaceTraders.ShipyardFiniteControl do
         Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
 
       if fleet = Process.delete(:proof_fleet) do
-        SpaceTraders.AgentFixtures.cleanup_operator_fixture(fleet.scope.operator.id)
-
-        Repo.query!("DELETE FROM timeline_events WHERE owner_id = ANY($1)", [
-          ~w(PROOF824-1 PROOF824-2 PROOF824-3)
-        ])
+        ShipyardProofRuntime.cleanup_control_fixture(fleet)
       end
-
-      Ecto.Adapters.SQL.Sandbox.mode(Repo, :manual)
-      SpaceTraders.FixtureLeakProbe.assert_clean!(leak_baseline, capacity: true)
     end
   end
 end
