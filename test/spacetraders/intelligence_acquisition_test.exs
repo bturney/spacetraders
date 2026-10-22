@@ -1914,17 +1914,16 @@ defmodule SpaceTraders.IntelligenceAcquisitionTest do
     assert projection.facts["ships"].observing_ship_symbol == ship.symbol
   end
 
-  # Pins current behaviour for the #739 diagnosis: Ship Offer evidence, the
-  # acquisition planner's only offer source, is observed only for a Strategic
-  # Objective whose objective or evaluation text names Ships or Fleet growth.
-  # A #739 repair is expected to flip the preset rows.
+  # Without a real Claim-only loser the ordinary presets must not poll
+  # Shipyards. Need-driven preset coverage lives in ShipyardEvidenceDemandTest;
+  # an explicit Ship objective still independently justifies observation.
   for {label, objectives, shipyard?} <-
         Enum.map(FleetStrategy.presets(), &{&1.id, &1.objectives, false}) ++
           [
             {"Ship-naming objective",
              [%{"objective" => "Expand Fleet with a Ship", "kind" => "attain"}], true}
           ] do
-    test "#{label} Strategy plans Ship Offer observation: #{shipyard?}" do
+    test "#{label} without eligible unmet work plans Ship Offer observation: #{shipyard?}" do
       {agent, ship, previous, _commitment} = claimed_ship(hd(unquote(Macro.escape(objectives))))
       scope = Scope.for_operator(Repo.get!(Operator, agent.operator_id))
 
