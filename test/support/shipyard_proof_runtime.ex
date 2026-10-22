@@ -268,7 +268,13 @@ defmodule SpaceTraders.ShipyardProofRuntime do
   def settle_ships do
     for symbol <- ~w(PROOF824-1 PROOF824-2),
         {pid, _} <- Registry.lookup(SpaceTraders.Fleet.ShipRegistry, symbol) do
-      run(fn -> :sys.get_state(pid) end)
+      run(fn ->
+        # The first barrier waits for the arrival callback. That callback can
+        # cast its next arrival arm to itself behind an already queued system
+        # request; the second barrier observes that self-cast too.
+        :sys.get_state(pid)
+        :sys.get_state(pid)
+      end)
     end
 
     :ok

@@ -126,6 +126,20 @@ defmodule SpaceTraders.ShipyardProofTest do
       Runtime.settle_ships()
       Runtime.next_event()
       Runtime.settle_ships()
+
+      assert SpaceTraders.TestClock.next_due_at(),
+             inspect(
+               %{
+                 intents:
+                   Enum.map(
+                     Repo.all(SpaceTraders.Fleet.Intent),
+                     &Map.take(&1, [:type, :status, :blocker, :last_action_result])
+                   ),
+                 requests: Enum.map(World.snapshot(world).requests, &{&1.path, &1.completed_at})
+               },
+               limit: :infinity
+             )
+
       Runtime.next_event()
       Runtime.settle_ships()
       state = World.snapshot(world)
