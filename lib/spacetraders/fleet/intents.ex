@@ -2728,7 +2728,7 @@ defmodule SpaceTraders.Fleet.Intents do
       in_flight_action: nil,
       last_action_result: result,
       blocker: nil,
-      finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      finished_at: Clock.timestamp(:second)
     )
   end
 
@@ -2807,7 +2807,7 @@ defmodule SpaceTraders.Fleet.Intents do
            in_flight_action: nil,
            last_action_result: result,
            blocker: nil,
-           finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+           finished_at: Clock.timestamp(:second)
          ) do
       {:ok, intent} ->
         if intent.caller == "commitment" and intent.type == "deliver",
