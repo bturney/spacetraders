@@ -114,7 +114,7 @@ defmodule SpaceTraders.ShipyardProofTest do
 
       Runtime.settle_ships()
       assert %DateTime{} = SpaceTraders.TestClock.next_due_at()
-      Runtime.next_event()
+      Runtime.next_arrival("PROOF824-1")
       Runtime.settle_ships()
 
       assert [record] = SpaceTraders.Outcomes.Earnings.list(fleet.generation.id)
@@ -125,7 +125,7 @@ defmodule SpaceTraders.ShipyardProofTest do
       # reset the remaining 38 fuel. Complete its actual return and productive use.
       assert {:ok, %{action: :published}} = Runtime.run(fn -> Runtime.reconcile(fleet) end)
       Runtime.settle_ships()
-      Runtime.next_event()
+      Runtime.next_arrival("PROOF824-1")
       Runtime.settle_ships()
 
       assert SpaceTraders.TestClock.next_due_at(),
@@ -141,7 +141,7 @@ defmodule SpaceTraders.ShipyardProofTest do
                limit: :infinity
              )
 
-      Runtime.next_event()
+      Runtime.next_arrival("PROOF824-1")
       Runtime.settle_ships()
       state = World.snapshot(world)
       purchases = Enum.filter(state.requests, &String.ends_with?(&1.path, "/purchase"))
