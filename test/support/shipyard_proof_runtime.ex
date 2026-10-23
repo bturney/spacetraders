@@ -150,7 +150,11 @@ defmodule SpaceTraders.ShipyardProofRuntime do
         %{at: Clock.utc_now(), result: boundary_summary(first)}
       ])
 
-    as_of = if Keyword.get(opts, :stop_at_readiness), do: Clock.utc_now(), else: cutoff
+    prefix? =
+      Keyword.get(opts, :stop_at_readiness, false) or
+        Keyword.get(opts, :stop_at_unsettled_purchase, false)
+
+    as_of = if prefix?, do: Clock.utc_now(), else: cutoff
     state = World.snapshot(world)
     {:ok, floor} = SpaceTraders.FleetExecution.credit_floor(fleet.revision)
     {code, 0} = System.cmd("git", ["rev-parse", "HEAD"])
@@ -170,6 +174,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       classification: "blocked",
       run_kind:
         cond do
+          Keyword.get(opts, :stop_at_unsettled_purchase) -> "unsettled_purchase_prefix"
           Keyword.get(opts, :stop_at_readiness) -> "acquisition_readiness_prefix"
           cutoff == DateTime.add(@t0, 48, :hour) -> "matched_control_48h"
           true -> "prefix_only"
@@ -544,7 +549,14 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       Keyword.get(opts, :stop_at_readiness, false) and
         match?({:ok, _}, SpaceTraders.Fleet.owned_ship(fleet.agent, "PROOF824-3"))
 
-    if ready? or DateTime.compare(Clock.utc_now(), cutoff) != :lt do
+    unsettled? =
+      Keyword.get(opts, :stop_at_unsettled_purchase, false) and
+        match?(
+          {_, %{state: state}} when state in ["sent_or_unknown", "ambiguous", "bounded_unknown"],
+          SpaceTraders.FleetAcquisition.open_purchase(fleet.agent)
+        )
+
+    if ready? or unsettled? or DateTime.compare(Clock.utc_now(), cutoff) != :lt do
       Enum.reverse(progress)
     else
       receive do

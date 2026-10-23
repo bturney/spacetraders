@@ -252,7 +252,14 @@ defmodule SpaceTraders.Evidence do
     )
     |> Repo.all()
     |> Enum.find_value(fn source ->
-      with {:ok, binding} <- bind_source(agent, source),
+      # Ship purchase's presence read can finish at the exact send timestamp.
+      # A retained tie cannot distinguish that pre-send Fleet from recovery;
+      # conservatively acquire a replacement, rather than proving a real
+      # purchase absent. Fresh reads below still retain their normal proof path.
+      with true <-
+             attempt.operation_id != "purchase-ship" or
+               DateTime.compare(source.observed_at, since) == :gt,
+           {:ok, binding} <- bind_source(agent, source),
            true <- usable_binding?(binding, attempt),
            [_ | _] <- source_dependencies(source) do
         binding

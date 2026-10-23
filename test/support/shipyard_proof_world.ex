@@ -59,6 +59,24 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
   def market(world, symbol), do: market_from(snapshot(world), symbol)
 
+  @doc "Named S4 variation: advertise another obtainable hull after the first effect."
+  def advertise_second_offer(world) do
+    Agent.update(world, fn %{offer_stock: 0, ships: ships} = state when map_size(ships) == 3 ->
+      state
+      |> Map.put(:offer_stock, 1)
+      |> Map.put(:second_offer_advertised_at, Clock.utc_now())
+    end)
+  end
+
+  @doc "Named R1 variation: announce only thirty minutes remaining, without moving time."
+  def shorten_horizon(world) do
+    Agent.update(world, fn state ->
+      state
+      |> Map.put(:reset_at, DateTime.add(Clock.utc_now(), 30, :minute))
+      |> Map.put(:short_horizon_announced_at, Clock.utc_now())
+    end)
+  end
+
   def account(world, cutoff) do
     state = snapshot(world)
 
@@ -343,8 +361,13 @@ defmodule SpaceTraders.ShipyardProofWorld do
     unless present?(state, @source), do: raise("proof Ship purchase requires presence")
     if state.offer_stock == 0, do: raise("proof Ship Offer exhausted")
     if state.credits < 100_000, do: raise("proof Ship purchase exceeds credits")
-    acquired = ship("PROOF824-3", :trader)
-    state = put_ship(%{state | credits: state.credits - 100_000, offer_stock: 0}, acquired)
+    acquired = ship("PROOF824-#{map_size(state.ships) + 1}", :trader)
+
+    state =
+      put_ship(
+        %{state | credits: state.credits - 100_000, offer_stock: state.offer_stock - 1},
+        acquired
+      )
 
     {%{
        "ship" => acquired,
