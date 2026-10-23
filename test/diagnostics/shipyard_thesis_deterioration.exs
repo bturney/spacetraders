@@ -1,15 +1,12 @@
-defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
+# Opt-in whole-runtime S3 matrix. Run each preset/arm with mix run --no-start;
+# ordinary fleet_intents_test.exs retains the bounded execution-guard tracer.
+# No ExUnit timeout increase, sleeps, skipped assertions or admission bypass.
+defmodule SpaceTraders.ShipyardThesisDeterioration do
   # #841 / #821 S3: after the acquired Ship is ready, its route's destination
   # sell falls to 1,000. Only a legitimate on-site Market read can reveal it.
   # Both arms run under one request per two game-seconds through the normal
   # limiter, with the original trader holding disjoint work across the fence.
-  use ExUnit.Case, async: false
-
-  # Wall-time budget, not a wait: each run is bounded by its 6-game-hour
-  # cutoff. Readiness lands at 00:27 or 02:16 and the original trader may share
-  # the acquired Ship's route for whole cycles, so the disjoint fence point can
-  # arrive near 04:30 game time (about 70-80 s of real reconciliation).
-  @moduletag timeout: 180_000
+  import ExUnit.Assertions
 
   import Ecto.Query
 
@@ -22,10 +19,12 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
   @symbols ~w(PROOF824-1 PROOF824-2 PROOF824-3)
   @destination %{"IRON" => "X1-UX81-A2", "COPPER" => "X1-UX81-A3"}
 
-  setup_all do
+  def run do
+    if Process.whereis(Repo), do: raise("run this diagnostic with mix run --no-start")
+    assert is_nil(System.get_env("DATABASE_URL")), "use the checkout's isolated database"
+    Logger.configure(level: Application.get_env(:logger, :level, :error))
     baseline = SpaceTraders.FixtureLeakProbe.baseline()
     previous_repo = Application.fetch_env!(:spacetraders, SpaceTraders.Repo)
-    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.Repo)
 
     # Newly allocated Ships start their own timer process. Do not hold a
     # caller's Sandbox connection while that process initializes from the DB.
@@ -35,47 +34,65 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
       Keyword.put(previous_repo, :pool, DBConnection.ConnectionPool)
     )
 
-    {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.Repo)
-
-    on_exit(fn ->
+    try do
+      {:ok, _} = Application.ensure_all_started(:spacetraders)
+      replay()
+    after
       :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.Repo)
       Application.put_env(:spacetraders, SpaceTraders.Repo, previous_repo)
       {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.Repo)
       :ok = Ecto.Adapters.SQL.Sandbox.mode(SpaceTraders.Repo, :manual)
       SpaceTraders.FixtureLeakProbe.assert_clean!(baseline, capacity: true)
-    end)
+      assert Application.fetch_env!(:spacetraders, Repo) == previous_repo
 
-    :ok
+      IO.puts(
+        "#841 lifecycle: owned children quiesced; clock/governor/Repo restored; leak probe clean"
+      )
+    end
   end
 
-  setup do
-    start_supervised!({SpaceTraders.TestClock, @t0})
+  defp replay do
+    preset = System.fetch_env!("SHIPYARD_PROOF_PRESET")
+    arm = System.fetch_env!("SHIPYARD_PROOF_ARM")
+    assert preset in ~w(steady_growth charted_expansion)
+    assert arm in ~w(before_buy after_buy)
+    arm = if arm == "before_buy", do: :before_buy, else: :after_buy
+    {:ok, supervisor} = Supervisor.start_link([], strategy: :one_for_one)
     previous = Application.fetch_env(:spacetraders, :clock)
-    Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
     :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
 
-    start_supervised!(
-      {SpaceTraders.API.CapacityGovernor, now: &Clock.utc_now/0, probe_base_ms: 1000}
-    )
+    try do
+      {:ok, _} = Supervisor.start_child(supervisor, {SpaceTraders.TestClock, @t0})
+      Application.put_env(:spacetraders, :clock, SpaceTraders.TestClock)
 
-    controller = self()
+      {:ok, _} =
+        Supervisor.start_child(
+          supervisor,
+          {SpaceTraders.API.CapacityGovernor, now: &Clock.utc_now/0, probe_base_ms: 1000}
+        )
 
-    # The S3 external capacity: one request per two game-seconds, imposed by
-    # the client's ordinary limiter on the shared application clock.
-    start_supervised!(
-      {SpaceTraders.API.RateLimiter,
-       rate: 0.5,
-       burst: 1,
-       pool_rate: 0.0,
-       pool_burst: 0,
-       clock: %{
-         now: fn -> DateTime.diff(Clock.utc_now(), @t0, :millisecond) end,
-         sleep: fn ms -> Runtime.wait(controller, :protocol, ms) end
-       }}
-    )
+      controller = self()
 
-    on_exit(fn ->
+      # The S3 external capacity: one request per two game-seconds, imposed by
+      # the client's ordinary limiter on the shared application clock.
+      {:ok, _} =
+        Supervisor.start_child(
+          supervisor,
+          {SpaceTraders.API.RateLimiter,
+           rate: 0.5,
+           burst: 1,
+           pool_rate: 0.0,
+           pool_burst: 0,
+           clock: %{
+             now: fn -> DateTime.diff(Clock.utc_now(), @t0, :millisecond) end,
+             sleep: fn ms -> Runtime.wait(controller, :protocol, ms) end
+           }}
+        )
+
+      prove(supervisor, preset, arm)
+    after
       for symbol <- @symbols, do: SpaceTraders.Quiesced.stop_ship(symbol)
+      Supervisor.stop(supervisor)
 
       case previous do
         {:ok, clock} -> Application.put_env(:spacetraders, :clock, clock)
@@ -86,125 +103,166 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
 
       {:ok, _} =
         Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
-    end)
 
-    :ok
+      if fleet = Process.delete(:s3_fleet), do: Runtime.cleanup_control_fixture(fleet)
+    end
   end
 
-  for preset <- ~w(steady_growth charted_expansion), arm <- [:before_buy, :after_buy] do
-    @preset preset
-    @arm arm
-    test "#{preset} #{arm}: a deteriorated thesis is fenced while independent work completes" do
-      world = start_supervised!({World, []})
-      controller = self()
-      context = start_supervised!({Elixir.Agent, fn -> %{fleet: nil, s3: nil, marks: []} end})
+  defp prove(supervisor, preset, arm) do
+    host_started_at = DateTime.utc_now()
+    {:ok, world} = Supervisor.start_child(supervisor, {World, []})
+    controller = self()
 
-      Req.Test.stub(SpaceTraders.API, fn conn ->
-        conn = World.reply(world, conn, controller)
-        mark_progress(context, conn)
-        maybe_deteriorate(world, context, @arm, conn)
-        conn
-      end)
+    {:ok, context} =
+      Supervisor.start_child(
+        supervisor,
+        {Elixir.Agent, fn -> %{fleet: nil, s3: nil, marks: []} end}
+      )
 
-      Req.Test.allow(SpaceTraders.API, self(), fn ->
-        DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
-        |> Enum.map(fn {_, pid, _, _} -> pid end)
-      end)
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      conn = World.reply(world, conn, controller)
+      mark_progress(context, conn)
+      maybe_deteriorate(world, context, arm, conn)
+      conn
+    end)
 
-      fleet = Runtime.fresh_generation(world, @preset)
+    Req.Test.allow(SpaceTraders.API, self(), fn ->
+      DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
+      |> Enum.map(fn {_, pid, _, _} -> pid end)
+    end)
 
-      on_exit(fn ->
-        for symbol <- @symbols, do: SpaceTraders.Quiesced.stop_ship(symbol)
-        Runtime.cleanup_control_fixture(fleet)
-      end)
+    fleet = Runtime.fresh_generation(world, preset)
+    Process.put(:s3_fleet, fleet)
 
-      Elixir.Agent.update(context, &%{&1 | fleet: fleet})
-      start_supervised!(SpaceTraders.Quiesced.child_spec(SpaceTraders.Evidence.DemandScheduler))
-      cutoff = DateTime.add(@t0, 6, :hour)
+    Elixir.Agent.update(context, &%{&1 | fleet: fleet})
 
-      result =
-        Runtime.finite_control(world, fleet, @preset, cutoff,
-          boundary: :application,
-          stop_when: fn -> fenced_proof_complete?(context, @arm) end
-        )
+    {:ok, _} =
+      Supervisor.start_child(
+        supervisor,
+        SpaceTraders.Quiesced.child_spec(SpaceTraders.Evidence.DemandScheduler)
+      )
 
-      s3 = Elixir.Agent.get(context, & &1.s3)
-      assert s3, "the acquired Ship never reached the #{@arm} point beside disjoint work"
-      receipt = receipt(result, world, fleet, s3, @arm)
-      write_receipt(receipt, @preset, @arm)
-      %{good: good, destination: destination} = s3
+    cutoff = DateTime.add(@t0, 6, :hour)
 
-      # The observable change: a later legitimate on-site Market read.
-      assert %{observed_at: observed_at} = changed = receipt.changed_evidence
-      assert changed.operation_id == "get-market"
-      assert changed.sell_price <= 1000
-      assert DateTime.compare(observed_at, s3.deteriorated_at) != :lt
+    result =
+      Runtime.finite_control(world, fleet, preset, cutoff,
+        boundary: :application,
+        stop_when: fn -> fenced_proof_complete?(context, arm) end
+      )
 
-      # Recovery was not starved: both the fenced reconciliation and the
-      # independent sale finished before the hard cutoff, under real waits.
-      assert DateTime.compare(result.execution_stopped_at, cutoff) == :lt
-      starts = result.request_effects |> Enum.map(& &1.started_at) |> Enum.sort(DateTime)
+    s3 = Elixir.Agent.get(context, & &1.s3)
+    assert s3, "the acquired Ship never reached the #{arm} point beside disjoint work"
+    receipt = receipt(result, world, fleet, s3, arm)
+    write_receipt(receipt, preset, arm)
+    %{good: good, destination: destination} = s3
 
-      assert starts
-             |> Enum.chunk_every(2, 1, :discard)
-             |> Enum.all?(fn [a, b] -> DateTime.diff(b, a, :millisecond) >= 2000 end)
+    # The observable change: a later legitimate on-site Market read.
+    assert %{observed_at: observed_at} = changed = receipt.changed_evidence
+    assert changed.operation_id == "get-market"
+    assert changed.sell_price <= 1000
+    assert DateTime.compare(observed_at, s3.deteriorated_at) != :lt
 
-      assert Enum.any?(result.waits, &(&1.kind == :protocol))
-      refute Enum.any?(result.request_effects, &Map.has_key?(&1, :failure))
+    # Recovery was not starved: both the fenced reconciliation and the
+    # independent sale finished before the hard cutoff, under real waits.
+    assert DateTime.compare(result.execution_stopped_at, cutoff) == :lt
+    starts = result.request_effects |> Enum.map(& &1.started_at) |> Enum.sort(DateTime)
 
-      # No further spending on the deteriorated route once it was observed.
-      assert [] ==
-               for(
-                 r <- result.request_effects,
-                 r.method == "POST" and String.ends_with?(r.path, "/purchase"),
-                 r.body["symbol"] == good,
-                 DateTime.compare(r.started_at, observed_at) == :gt,
-                 do: {r.path, r.started_at}
-               )
+    assert starts
+           |> Enum.chunk_every(2, 1, :discard)
+           |> Enum.all?(fn [a, b] -> DateTime.diff(b, a, :millisecond) >= 2000 end)
 
-      # Independent authority: the original trader's disjoint Commitment held
-      # its Claim across the fence and completed a profitable sale after it.
-      independent = s3.independent
-      assert independent.claims == ["PROOF824-1"]
-      refute "market:X1-UX81:#{destination}" in subjects(independent)
-      [sale | _] = receipt.independent_sales
-      assert DateTime.compare(sale.finished_at, observed_at) == :gt
-      assert sale.net_earnings > 0
+    assert Enum.any?(result.waits, &(&1.kind == :protocol))
+    refute Enum.any?(result.request_effects, &Map.has_key?(&1, :failure))
 
-      refute Enum.any?(
-               receipt.intents.independent,
-               &(&1.status in ~w(infeasible superseded blocked))
+    # No further spending on the deteriorated route once it was observed.
+    assert [] ==
+             for(
+               r <- result.request_effects,
+               r.method == "POST" and String.ends_with?(r.path, "/purchase"),
+               r.body["symbol"] == good,
+               DateTime.compare(r.started_at, observed_at) == :gt,
+               do: {r.path, r.started_at}
              )
 
-      assert result.account.unexplained_cash == 0
+    # Independent authority: the original trader's disjoint Commitment held
+    # its Claim across the fence and completed a profitable sale after it.
+    independent = s3.independent
+    assert independent.claims == ["PROOF824-1"]
+    refute "market:X1-UX81:#{destination}" in subjects(independent)
+    [sale | _] = receipt.independent_sales
+    assert DateTime.compare(sale.finished_at, observed_at) == :gt
+    assert sale.net_earnings > 0
 
-      case @arm do
-        :before_buy ->
-          # The originally planned purchase was refused by ordinary execution
-          # revalidation against the newer destination evidence.
-          assert [refused | _] = receipt.refused_dependent_buys
-          assert refused.trade_symbol == good
-          assert refused.reason == "destination_spread_lost"
-          assert refused.planned_destination_evidence != "evidence-observation:#{changed.id}"
+    retained = Elixir.Agent.get(context, & &1.independent_sale_authority)
+    assert retained.claim.commitment_id == independent.id
+    assert retained.intent_id in Enum.map(independent.intents, & &1.id)
 
-        :after_buy ->
-          # Sunk cost stays truthful: the actual charge remains recorded,
-          # either in the realized cycle or as retained Cargo basis.
-          [bought] = receipt.fenced_purchase
+    refute Enum.any?(
+             receipt.intents.independent,
+             &(&1.status in ~w(infeasible superseded blocked))
+           )
 
-          case receipt.fenced_cycle do
-            %{} = cycle ->
-              # World charge/receipt, not the ledger's own arithmetic: a sale
-              # at no more than 1,000 cannot recover a 1,000+ unit cost.
-              assert cycle.goods_cost == bought.charge
-              assert cycle.revenue == receipt.fenced_sale_receipt
-              assert cycle.expected_value > 0 and cycle.net_earnings <= 0
+    assert result.account.unexplained_cash == 0
+    assert result.account.low_credits >= result.floor
+    assert result.account.acquisition_outlays == 100_000
 
-            nil ->
-              assert get_in(result.account.cargo_basis, ["PROOF824-3", good]) == bought.charge
-          end
-      end
+    assert Enum.count(
+             result.request_effects,
+             &(&1.method == "POST" and &1.path == "/v2/my/ships")
+           ) == 1
+
+    purchases = Enum.filter(result.attempts, &(&1.operation_id == "purchase-ship"))
+    assert [%{state: "succeeded"}] = Enum.filter(purchases, & &1.sent_or_unknown_at)
+
+    assert Enum.all?(
+             purchases,
+             &(&1.state == "succeeded" or
+                 (&1.state == "not_sent" and is_nil(&1.sent_or_unknown_at)))
+           )
+
+    case arm do
+      :before_buy ->
+        # The originally planned purchase was refused by ordinary execution
+        # revalidation against the newer destination evidence.
+        assert [refused | _] = receipt.refused_dependent_buys
+        assert refused.trade_symbol == good
+        assert refused.reason == "destination_spread_lost"
+        assert refused.planned_destination_evidence != "evidence-observation:#{changed.id}"
+
+      :after_buy ->
+        # Sunk cost stays truthful: the actual charge remains recorded,
+        # either in the realized cycle or as retained Cargo basis.
+        [bought] = receipt.fenced_purchase
+
+        case receipt.fenced_cycle do
+          %{} = cycle ->
+            # World charge/receipt, not the ledger's own arithmetic: a sale
+            # at no more than 1,000 cannot recover a 1,000+ unit cost.
+            assert cycle.goods_cost == bought.charge
+            assert cycle.revenue == receipt.fenced_sale_receipt
+            assert cycle.expected_value > 0 and cycle.net_earnings <= 0
+
+          nil ->
+            assert get_in(result.account.cargo_basis, ["PROOF824-3", good]) == bought.charge
+        end
     end
+
+    receipt
+    |> Map.put(:classification, "pass: bounded S3 arm; not P1 or full #821")
+    |> Map.put(:independent_sale_authority, retained)
+    |> write_receipt(preset, arm)
+
+    IO.inspect(
+      %{
+        preset: preset,
+        arm: arm,
+        host_ms: DateTime.diff(DateTime.utc_now(), host_started_at, :millisecond),
+        stopped_at: result.execution_stopped_at,
+        requests: length(result.request_effects),
+        status: :passed
+      },
+      label: "#841 S3"
+    )
   end
 
   # -- S3 trigger -----------------------------------------------------------
@@ -262,15 +320,19 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
          true <- "market:X1-UX81:#{@destination[other]}" in subjects,
          false <- "market:X1-UX81:#{@destination[good]}" in subjects,
          # Work still ahead of it: an unfinished Intent of that Commitment.
-         true <-
-           Enum.any?(
+         [_ | _] = intents <-
+           Enum.filter(
              SpaceTraders.Fleet.Intents.current(fleet.agent),
              &(&1.fleet_commitment_id == commitment.id)
            ) do
       {:ok,
        commitment
        |> Map.take(~w(id candidate_id claims dependencies expected_value)a)
-       |> Map.put(:claim, claim)}
+       |> Map.put(:claim, claim)
+       |> Map.put(
+         :intents,
+         Enum.map(intents, &Map.take(&1, ~w(id type status fleet_commitment_id)a))
+       )}
     else
       _ -> :no_disjoint_work
     end
@@ -284,6 +346,25 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
   # Request marks after the deterioration, recorded by the stub so the stop
   # check never copies the World's whole request history.
   defp mark_progress(context, %{method: method, request_path: path} = conn) do
+    if method == "POST" and path == "/v2/my/ships/PROOF824-1/sell" do
+      with %{s3: %{} = s3, fleet: fleet} <- Elixir.Agent.get(context, & &1),
+           {:ok, claim} <- FleetAllocation.current_ship_claim(fleet.agent, "PROOF824-1"),
+           intent when not is_nil(intent) <-
+             Enum.find(
+               SpaceTraders.Fleet.Intents.current(fleet.agent),
+               &(&1.fleet_commitment_id == s3.independent.id and &1.type == "sell")
+             ) do
+        Elixir.Agent.update(
+          context,
+          &Map.put(&1, :independent_sale_authority, %{
+            at: Clock.utc_now(),
+            claim: claim,
+            intent_id: intent.id
+          })
+        )
+      end
+    end
+
     Elixir.Agent.update(context, fn
       %{s3: %{} = s3} = state ->
         mark =
@@ -371,6 +452,7 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
       %{
         intent_id: intent.id,
         commitment_id: intent.fleet_commitment_id,
+        finished_at: intent.finished_at,
         trade_symbol: intent.parameters["trade_symbol"],
         reason: get_in(intent.last_action_result, ["evidence", "reason"]),
         planned_destination_evidence:
@@ -436,6 +518,7 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
 
     %{
       ticket: 841,
+      classification: "unvalidated: assertions must complete",
       scenario: "S3 thesis deterioration / independent work",
       arm: arm,
       limits: [
@@ -444,6 +527,19 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
         "Not acquisition qualification, cash superiority, live qualification or Gate 0."
       ],
       code_revision: result.code_revision,
+      baseline: result.baseline,
+      fixture_sources:
+        Map.put(
+          result.fixture_sources,
+          "test/diagnostics/shipyard_thesis_deterioration.exs",
+          :crypto.hash(:sha256, File.read!(__ENV__.file)) |> Base.encode16(case: :lower)
+        ),
+      manifest:
+        Map.put(result.manifest, :capacity, %{rate_per_second: 0.5, burst: 1, overflow_pool: 0}),
+      t0: result.t0,
+      reset_at: result.reset_at,
+      host_started_at: result.host_started_at,
+      host_finished_at: result.host_finished_at,
       preset: result.preset,
       floor: result.floor,
       generation: result.generation,
@@ -482,7 +578,11 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
         ),
       waits: Enum.frequencies_by(result.waits, & &1.kind),
       execution_stopped_at: result.execution_stopped_at,
-      decisions: result.decisions
+      decisions: result.decisions,
+      attempts: result.attempts,
+      commitments: result.all_commitments,
+      demands: result.all_demands,
+      observations: result.observations
     }
   end
 
@@ -501,3 +601,5 @@ defmodule SpaceTraders.ShipyardThesisDeteriorationTest do
 
   defp before?(at, limit), do: DateTime.compare(at, limit) != :gt
 end
+
+SpaceTraders.ShipyardThesisDeterioration.run()
