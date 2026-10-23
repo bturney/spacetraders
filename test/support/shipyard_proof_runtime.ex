@@ -49,7 +49,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
         symbol: agent.symbol,
         faction: agent.faction,
         fleet_strategy_revision_id: revision.id,
-        starting_credits: 400_000,
+        starting_credits: World.snapshot(world).initial_credits,
         inserted_at: @t0
       })
 
