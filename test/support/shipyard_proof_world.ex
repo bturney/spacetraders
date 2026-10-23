@@ -27,7 +27,7 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
     credits = Keyword.get(opts, :credits, 400_000)
     reset_at = Keyword.get(opts, :reset_at, DateTime.add(@t0, 120, :hour))
-    destination_sell = Keyword.get(opts, :destination_sell, 1500)
+    destination_sell = Map.new(~w(IRON COPPER), &{&1, Keyword.get(opts, :destination_sell, 1500)})
     rivals = Keyword.get(opts, :rivals, [])
 
     Agent.start_link(fn ->
@@ -88,6 +88,26 @@ defmodule SpaceTraders.ShipyardProofWorld do
       |> Map.put(:short_horizon_announced_at, Clock.utc_now())
     end)
   end
+
+  @doc """
+  Named S3 variation: lower one route's destination sell quote to 1,000 from
+  now on. Only a later legitimate on-site Market read can reveal it.
+  """
+  def deteriorate_destination(world, trade) when trade in ~w(IRON COPPER) do
+    Agent.update(world, fn state ->
+      state
+      |> Map.update(:destination_sell, %{trade => 1000}, &Map.put(&1, trade, 1000))
+      |> Map.update(:deteriorations, [deterioration(trade)], &(&1 ++ [deterioration(trade)]))
+    end)
+  end
+
+  defp deterioration(trade),
+    do: %{
+      at: Clock.utc_now(),
+      trade: trade,
+      waypoint: if(trade == "IRON", do: "X1-UX81-A2", else: "X1-UX81-A3"),
+      sell: 1000
+    }
 
   def account(world, cutoff) do
     state = snapshot(world)
@@ -175,10 +195,10 @@ defmodule SpaceTraders.ShipyardProofWorld do
           ]
 
         "X1-UX81-A2" ->
-          [listing.("IRON", "IMPORT", 1600, state.destination_sell, :demand_units)]
+          [listing.("IRON", "IMPORT", 1600, destination_sell(state, "IRON"), :demand_units)]
 
         "X1-UX81-A3" ->
-          [listing.("COPPER", "IMPORT", 1600, state.destination_sell, :demand_units)]
+          [listing.("COPPER", "IMPORT", 1600, destination_sell(state, "COPPER"), :demand_units)]
       end ++ [good("FUEL", "EXCHANGE", 100, 90)]
 
     of_type = fn type ->
@@ -194,6 +214,9 @@ defmodule SpaceTraders.ShipyardProofWorld do
       "tradeGoods" => goods
     }
   end
+
+  defp destination_sell(state, trade),
+    do: state |> Map.get(:destination_sell, %{}) |> Map.get(trade, 1500)
 
   defp good(symbol, type, buy, sell) do
     %{
