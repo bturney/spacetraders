@@ -265,6 +265,10 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
     assert retained() == before
     run_migrations(all: true)
 
+    # The sole legacy attempt keeps its identity and receives the first ledger sequence.
+    assert query("SELECT id::text, sequence FROM mutation_attempts ORDER BY sequence").rows ==
+             [["7299492a-f749-4d32-8bdf-e53d7a21d87a", 1]]
+
     expanded =
       List.update_at(before, 4, fn rows ->
         Enum.map(rows, fn [row] -> [Map.put(row, "initial_fleet_strategy_revision_id", nil)] end)
@@ -273,7 +277,9 @@ defmodule SpaceTraders.CurrentFleetMigrationTest do
         Enum.map(rows, fn [row] -> [Map.put(row, "retired_at", nil)] end)
       end)
       |> List.update_at(8, fn rows ->
-        Enum.map(rows, fn [row] -> [Map.put(row, "recovery_credential_ciphertext", nil)] end)
+        Enum.map(rows, fn [row] ->
+          [row |> Map.put("recovery_credential_ciphertext", nil) |> Map.put("sequence", 1)]
+        end)
       end)
       |> drop_retired_columns()
 
