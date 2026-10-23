@@ -37,6 +37,7 @@ defmodule SpaceTraders.ShipyardProofTest do
     on_exit(fn ->
       SpaceTraders.Quiesced.stop_ship("PROOF824-1")
       SpaceTraders.Quiesced.stop_ship("PROOF824-2")
+      SpaceTraders.Quiesced.stop_ship("PROOF824-3")
       restore(:clock, previous_clock)
       restart_governor()
     end)
@@ -238,6 +239,56 @@ defmodule SpaceTraders.ShipyardProofTest do
     end
   end
 
+  test "the amended positive prefix retains actual work without an external liability" do
+    # The exact 48h replay is opt-in: test/diagnostics/shipyard_finite_control.exs.
+    preset = System.get_env("SHIPYARD_PROOF_PRESET", "steady_growth")
+    world = start_supervised!({World, []})
+    controller = self()
+    Req.Test.stub(SpaceTraders.API, fn conn -> World.reply(world, conn, controller) end)
+
+    Req.Test.allow(SpaceTraders.API, self(), fn ->
+      DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
+      |> Enum.map(fn {_, pid, _, _} -> pid end)
+    end)
+
+    fleet = Runtime.fresh_generation(world, preset)
+    start_supervised!(SpaceTraders.Quiesced.child_spec(SpaceTraders.Evidence.DemandScheduler))
+    result = Runtime.finite_control(world, fleet, preset, DateTime.add(@t0, 1, :hour))
+    assert result.as_of == DateTime.add(@t0, 1, :hour)
+    assert result.account.credits == 400_000 + result.account.net_cash
+    assert result.account.receipts > 0
+    assert result.account.goods_outlays > 0
+    assert result.account.fuel_outlays > 0
+    assert result.account.unexplained_cash == 0
+    refute Map.has_key?(World.snapshot(world), :pending_debit)
+    refute Enum.any?(result.account.effects, &(&1.path == "/fixture/external-debit"))
+    assert result.manifest.worst_preset_funding == 320_000
+    assert result.manifest.selected_work_initial_reservation == 50_000
+    assert result.manifest.acquisition_preparation_bound == 135_000
+    assert result.manifest.first_cycle_envelope == 60_000
+    assert result.floor == if(preset == "steady_growth", do: 50_000, else: 75_000)
+    assert result.account.low_credits >= result.floor
+    assert length(result.decisions) > 0
+
+    assert Enum.any?(result.decisions, fn decision ->
+             Enum.any?(decision.alternatives || [], &(&1["reasons"] == ["claim_conflict"]))
+           end)
+
+    assert result.account.acquisition_outlays == 0 or result.classification == "blocked"
+    assert Enum.all?(result.earnings, &is_integer(&1.fleet_commitment_id))
+    assert Enum.all?(result.earnings, &is_integer(&1.strategy_decision_episode_id))
+    assert Enum.count(result.waits, &(&1.kind == :service)) == length(result.request_effects)
+    assert [_ | _] = unfinished = SpaceTraders.Fleet.Intents.current(fleet.agent)
+    for intent <- unfinished, do: assert(Enum.any?(result.intents, &(&1.id == intent.id)))
+    Runtime.write_control_receipt(result, preset)
+
+    for symbol <- ~w(PROOF824-1 PROOF824-2 PROOF824-3),
+        do: SpaceTraders.Quiesced.stop_ship(symbol)
+
+    assert {:ok, _} = Runtime.cleanup_control_fixture(fleet)
+    refute Repo.get(SpaceTraders.Agent.Agent, fleet.agent.id)
+  end
+
   test "the normal protocol budget waits on the same clock before one second of API service" do
     world = start_supervised!({World, []})
     controller = self()
@@ -262,6 +313,148 @@ defmodule SpaceTraders.ShipyardProofTest do
     assert request.completed_at == SpaceTraders.Clock.utc_now()
   end
 
+  for preset <- ~w(steady_growth charted_expansion) do
+    @payment_preset preset
+    test "#{preset}: separate payment safety protects and settles its real 20-unit purchase once" do
+      world = start_supervised!({World, scenario: :payment_safety})
+      controller = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        if String.ends_with?(conn.request_path, "/purchase"),
+          do: World.reply(world, conn, controller, :lost_response),
+          else: World.reply(world, conn, controller)
+      end)
+
+      Req.Test.allow(SpaceTraders.API, self(), fn ->
+        DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
+        |> Enum.map(fn {_, pid, _, _} -> pid end)
+      end)
+
+      fleet = Runtime.fresh_generation(world, @payment_preset)
+
+      assert {:ok, %{action: :published, commitments: commitments}} =
+               Runtime.run(fn -> Runtime.reconcile(fleet) end)
+
+      trade = Enum.find(commitments, &(&1.claims == ["PROOF824-1"]))
+      assert trade.reservations["credits"] == 25_000
+
+      [attempt] =
+        Enum.filter(
+          SpaceTraders.MutationAttempts.list_for_agent(fleet.agent),
+          &(&1.operation_id == "purchase-cargo")
+        )
+
+      assert attempt.state == "ambiguous"
+      assert attempt.prepared_evidence["spending"]["worst_case_exposure"] == 25_000
+      assert attempt.prepared_evidence["request"]["body"]["units"] == 20
+      assert attempt.provenance["commitment_id"] == trade.id
+      assert attempt.provenance["intent_id"]
+      assert %DateTime{} = attempt.sent_or_unknown_at
+
+      assert [%{id: id}] =
+               SpaceTraders.SafetyFence.blocking_attempts([
+                 SpaceTraders.SafetyFence.DependencyKey.agent_credits(fleet.agent.id)
+               ])
+
+      assert id == attempt.id
+      assert World.snapshot(world).credits == 380_000
+      assert World.account(world, SpaceTraders.Clock.utc_now()).goods_outlays == 20_000
+
+      unknown = %{
+        at: SpaceTraders.Clock.utc_now(),
+        attempt:
+          Map.take(
+            attempt,
+            ~w(id state prepared_evidence provenance prepared_at sent_or_unknown_at)a
+          ),
+        commitment: Map.take(trade, ~w(id claims reservations dependencies)a),
+        intent:
+          SpaceTraders.Fleet.Intents.current(fleet.agent)
+          |> Enum.find(&(&1.id == attempt.provenance["intent_id"]))
+          |> Map.take(
+            ~w(id status blocker in_flight_action mutation_attempt_id fleet_commitment_id next_attempt_at)a
+          )
+      }
+
+      effect_at =
+        World.snapshot(world).requests
+        |> Enum.find(&String.ends_with?(&1.path, "/purchase"))
+        |> Map.fetch!(:completed_at)
+
+      for symbol <- ~w(PROOF824-1 PROOF824-2), do: SpaceTraders.Quiesced.stop_ship(symbol)
+      Req.Test.stub(SpaceTraders.API, fn conn -> World.reply(world, conn, controller) end)
+
+      for symbol <- ~w(PROOF824-1 PROOF824-2),
+          do: SpaceTraders.Fleet.ShipServer.ensure_started(fleet.agent, symbol)
+
+      Runtime.run(fn -> SpaceTraders.Fleet.Intents.rearm_on_boot() end)
+
+      retry =
+        SpaceTraders.Timeline.pending_events(:ship, "PROOF824-1")
+        |> Enum.find(&(&1.event_type == "intent_retry"))
+
+      assert retry
+
+      Stream.repeatedly(fn ->
+        Runtime.next_event()
+        Runtime.settle_ships()
+      end)
+      |> Enum.find(fn _ -> not SpaceTraders.Timeline.pending?(retry) end)
+
+      Runtime.settle_ships()
+      settled = SpaceTraders.MutationAttempts.get!(attempt.id)
+
+      assert settled.state == "accepted",
+             inspect(
+               %{
+                 intents:
+                   Enum.map(
+                     SpaceTraders.Fleet.Intents.current(fleet.agent),
+                     &Map.take(&1, ~w(id status blocker next_attempt_at last_action_result)a)
+                   ),
+                 capacity: SpaceTraders.API.CapacityGovernor.diagnostics(),
+                 requests:
+                   World.snapshot(world).requests
+                   |> Enum.take(-6)
+                   |> Enum.map(&{&1.path, &1.completed_at})
+               },
+               limit: :infinity
+             )
+
+      assert Enum.map(settled.outcomes, & &1.classification) == ["ambiguous", "accepted"]
+      assert DateTime.compare(List.last(settled.outcomes).recorded_at, effect_at) == :gt
+      Runtime.run(fn -> SpaceTraders.Fleet.Intents.rearm_on_boot() end)
+      Runtime.settle_ships()
+
+      purchases =
+        Enum.filter(
+          SpaceTraders.MutationAttempts.list_for_agent(fleet.agent),
+          &(&1.operation_id == "purchase-cargo")
+        )
+
+      assert Enum.map(purchases, & &1.id) == [attempt.id]
+
+      assert SpaceTraders.SafetyFence.blocking_attempts([
+               SpaceTraders.SafetyFence.DependencyKey.agent_credits(fleet.agent.id)
+             ]) == []
+
+      account = World.account(world, SpaceTraders.Clock.utc_now())
+
+      assert {account.credits, account.goods_outlays, account.net_cash} ==
+               {380_000, 20_000, -20_000}
+
+      assert Enum.count(account.effects, &(&1.signed_cash != 0)) == 1
+
+      assert Enum.count(World.snapshot(world).requests, &String.ends_with?(&1.path, "/purchase")) ==
+               1
+
+      receipt = Runtime.write_payment_receipt(world, fleet, @payment_preset, unknown)
+      assert receipt.unknown.attempt.state == "ambiguous"
+      assert receipt.settled_attempt.state == "accepted"
+      assert receipt.account.net_cash == -20_000
+    end
+  end
+
   test "unsupported API requests fail rather than inventing an effect" do
     world = start_supervised!({World, []})
     controller = self()
@@ -283,6 +476,234 @@ defmodule SpaceTraders.ShipyardProofTest do
     assert after_rejection.credits == before.credits
     assert after_rejection.ships == before.ships
     assert [%{failure: "unsupported proof action jettison"}] = after_rejection.requests
+  end
+
+  test "finite shared route stock reprices partial transactions and replenishes only depleted units" do
+    world = start_supervised!({World, []})
+    controller = self()
+
+    request = fn units ->
+      Runtime.run(fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships/PROOF824-1/purchase", %{
+            "symbol" => "IRON",
+            "units" => units
+          }),
+          controller
+        )
+      end)
+    end
+
+    request.(20)
+    assert World.snapshot(world).routes["IRON"].source_units == 1580
+    assert hd(World.market(world, "X1-UX81-A1")["tradeGoods"])["purchasePrice"] == 1005
+    request.(20)
+    assert World.snapshot(world).routes["IRON"].source_units == 1560
+    assert hd(World.market(world, "X1-UX81-A1")["tradeGoods"])["purchasePrice"] == 1010
+    assert World.snapshot(world).routes["COPPER"].source_units == 1600
+    SpaceTraders.TestClock.advance(1798)
+    assert World.snapshot(world).routes["IRON"].source_units == 1600
+    assert hd(World.market(world, "X1-UX81-A1")["tradeGoods"])["purchasePrice"] == 1000
+    SpaceTraders.TestClock.advance(1800)
+    assert World.snapshot(world).routes["IRON"].source_units == 1600
+    assert World.snapshot(world).cargo_basis["PROOF824-1"]["IRON"] == 40_100
+  end
+
+  test "an unrepresentable fractional-credit quote is inconclusive, never silently rounded" do
+    world = start_supervised!({World, []})
+    controller = self()
+
+    Runtime.run(fn ->
+      World.reply(
+        world,
+        Plug.Test.conn(:post, "/v2/my/ships/PROOF824-1/purchase", %{
+          "symbol" => "IRON",
+          "units" => 1
+        }),
+        controller
+      )
+    end)
+
+    assert_raise RuntimeError, "frozen pro-rata quote is not an integer API credit amount", fn ->
+      World.market(world, "X1-UX81-A1")
+    end
+
+    assert World.snapshot(world).credits == 399_000
+    assert World.snapshot(world).routes["IRON"].source_units == 1599
+  end
+
+  test "the canonical on-site Ship Offer agrees with its single obtainable ready Ship" do
+    world = start_supervised!({World, []})
+    controller = self()
+    Req.Test.stub(SpaceTraders.API, fn conn -> World.reply(world, conn, controller) end)
+    fleet = Runtime.fresh_generation(world, "steady_growth")
+    refute SpaceTraders.Evidence.latest_observation(fleet.agent, "shipyard:X1-UX81:X1-UX81-A1")
+
+    assert {:ok, yard} =
+             Runtime.run(fn ->
+               SpaceTraders.Evidence.get_shipyard(fleet.agent, "X1-UX81", "X1-UX81-A1")
+             end)
+
+    assert yard.modifications_fee == 2000
+    assert [offer] = yard.ships
+    assert offer.purchase_price == 100_000
+    assert offer.type == "SHIP_LIGHT_HAULER"
+
+    required =
+      File.read!("priv/spec/models/ShipyardShip.json")
+      |> Jason.decode!()
+      |> Map.fetch!("required")
+
+    raw_offer =
+      World.snapshot(world).requests
+      |> List.last()
+      |> Map.fetch!(:response)
+      |> Map.fetch!("ships")
+      |> hd()
+
+    assert Enum.reject(required, &Map.has_key?(raw_offer, &1)) == []
+
+    request = fn ->
+      Runtime.run(fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships", %{
+            "shipType" => "SHIP_LIGHT_HAULER",
+            "waypointSymbol" => "X1-UX81-A1"
+          }),
+          controller
+        )
+      end)
+    end
+
+    response = request.() |> Map.fetch!(:resp_body) |> Jason.decode!() |> Map.fetch!("data")
+    acquired = Ship.from_json(response["ship"])
+    assert acquired.cargo.capacity == 40
+    assert acquired.engine == offer.engine
+    assert acquired.frame == offer.frame
+    assert acquired.modules == offer.modules
+    assert World.snapshot(world).credits == 300_000
+    assert World.snapshot(world).offer_stock == 0
+
+    Runtime.run(fn ->
+      assert_raise RuntimeError, "proof Ship Offer exhausted", fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships", %{
+            "shipType" => "SHIP_LIGHT_HAULER",
+            "waypointSymbol" => "X1-UX81-A1"
+          }),
+          controller
+        )
+      end
+    end)
+
+    assert {:ok, %{ships: []}} =
+             Runtime.run(fn ->
+               SpaceTraders.Evidence.get_shipyard(fleet.agent, "X1-UX81", "X1-UX81-A1")
+             end)
+
+    assert World.snapshot(world).credits == 300_000
+
+    for symbol <- ~w(PROOF824-1 PROOF824-3) do
+      Runtime.run(fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships/#{symbol}/purchase", %{
+            "symbol" => "IRON",
+            "units" => 40
+          }),
+          controller
+        )
+      end)
+    end
+
+    assert World.snapshot(world).routes["IRON"].source_units == 1520
+    assert World.snapshot(world).credits == 219_600
+    assert World.snapshot(world).cargo_basis["PROOF824-1"]["IRON"] == 40_000
+    assert World.snapshot(world).cargo_basis["PROOF824-3"]["IRON"] == 40_400
+  end
+
+  test "the shared world's transaction maximum rejects over-depth sends without charging" do
+    world = start_supervised!({World, []})
+    controller = self()
+
+    Runtime.run(fn ->
+      assert_raise RuntimeError, "proof transaction exceeds depth", fn ->
+        World.reply(
+          world,
+          Plug.Test.conn(:post, "/v2/my/ships/PROOF824-1/purchase", %{
+            "symbol" => "IRON",
+            "units" => 41
+          }),
+          controller
+        )
+      end
+    end)
+
+    assert World.snapshot(world).credits == 400_000
+    assert World.snapshot(world).routes["IRON"].source_units == 1600
+    assert World.snapshot(world).effects == []
+  end
+
+  test "status uses the same announced reset and every pinned required response field" do
+    world = start_supervised!({World, []})
+    controller = self()
+    conn = Runtime.run(fn -> World.reply(world, Plug.Test.conn(:get, "/v2/"), controller) end)
+    response = Jason.decode!(conn.resp_body)
+
+    schema =
+      File.read!("priv/spec/SpaceTraders.json")
+      |> Jason.decode!()
+      |> get_in([
+        "paths",
+        "/",
+        "get",
+        "responses",
+        "200",
+        "content",
+        "application/json",
+        "schema"
+      ])
+
+    assert Enum.reject(schema["required"], &Map.has_key?(response, &1)) == []
+
+    assert Enum.reject(
+             schema["properties"]["serverResets"]["required"],
+             &Map.has_key?(response["serverResets"], &1)
+           ) == []
+
+    assert response["serverResets"]["next"] == DateTime.to_iso8601(DateTime.add(@t0, 120, :hour))
+    assert response["resetDate"] == "2026-10-22"
+  end
+
+  test "a service completion after T remains a closure tail, not pre-T cash or Cargo" do
+    world = start_supervised!({World, []})
+    controller = self()
+    cutoff = DateTime.add(@t0, 48, :hour)
+    SpaceTraders.Clock.send_at(self(), :before_cutoff, DateTime.add(cutoff, -500, :millisecond))
+    Runtime.next_event()
+    assert_received :before_cutoff
+
+    Runtime.run(fn ->
+      World.reply(
+        world,
+        Plug.Test.conn(:post, "/v2/my/ships/PROOF824-1/purchase", %{
+          "symbol" => "IRON",
+          "units" => 40
+        }),
+        controller
+      )
+    end)
+
+    account = World.account(world, cutoff)
+    assert account.credits == 400_000
+    assert account.goods_outlays == 0
+    assert account.ships["PROOF824-1"]["cargo"]["units"] == 0
+    assert account.stock["IRON"].source_units == 1600
+    assert account.cargo_basis == %{}
+    assert [%{signed_cash: -40_000}] = account.closure_tail
   end
 
   defp restart_governor do
