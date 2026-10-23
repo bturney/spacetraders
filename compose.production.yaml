@@ -1,4 +1,7 @@
 services:
+  postgres:
+    restart: unless-stopped
+
   migrate:
     image: ${SPACETRADERS_IMAGE:-ghcr.io/bturney/spacetraders:latest}
     build: !reset null
