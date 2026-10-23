@@ -81,6 +81,7 @@ defmodule SpaceTraders.ShipyardPayback do
     p1 =
       cond do
         v.acquisitions == 0 -> :no_acquisition
+        v.acquisitions > 1 -> :fail
         path == :fail -> :fail
         path == :inconclusive or v.unknown_effects != [] -> :inconclusive
         productive_path(b) == :pass -> :current_policy_success
@@ -210,16 +211,16 @@ defmodule SpaceTraders.ShipyardPayback do
     |> Enum.map(fn [a, b] -> DateTime.diff(b.finished_at, a.finished_at) end)
   end
 
-  # A sent attempt whose send marker matches no request start on the world's
-  # clock: the application and world disagree about time in this arm.
+  # A sent attempt whose send marker is not followed, within 60 s of governed
+  # admission waiting, by a same-path request on the World's clock: the
+  # application and World disagree about time in this arm (unchanged B).
   defp send_clock_contradictions(result) do
-    starts =
-      MapSet.new(result.request_effects, &{&1.path, DateTime.truncate(&1.started_at, :second)})
+    starts = Enum.group_by(result.request_effects, & &1.path, & &1.started_at)
 
     for attempt <- result.attempts,
         sent = attempt.sent_or_unknown_at,
         path = get_in(attempt.prepared_evidence, ["request", "path"]),
-        not MapSet.member?(starts, {"/v2" <> path, DateTime.truncate(sent, :second)}),
+        not Enum.any?(Map.get(starts, "/v2" <> path, []), &(DateTime.diff(&1, sent) in 0..60)),
         do: attempt.id
   end
 

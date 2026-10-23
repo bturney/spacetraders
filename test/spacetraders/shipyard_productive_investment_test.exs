@@ -130,6 +130,7 @@ defmodule SpaceTraders.ShipyardProductiveInvestmentTest do
       assert length(arm.new_ship_cycles) == 2
       assert Enum.all?(arm.new_ship_cycles, &(is_integer(&1) and &1 > 0))
       assert arm.unknown_effects == []
+      assert arm.contradictions == []
       assert result.account.unexplained_cash == 0
       assert result.account.low_credits >= result.floor
       refute Enum.any?(result.request_effects, &Map.has_key?(&1, :failure))

@@ -39,7 +39,8 @@ defmodule SpaceTraders.ShipyardProductiveCompare do
 
   defp load(path) do
     arm = path |> File.read!() |> Jason.decode!(keys: :atoms)
-    update_in(arm.payback.classification, &String.to_existing_atom/1)
+    classes = Map.new(~w(supported inconclusive not_applicable)a, &{Atom.to_string(&1), &1})
+    update_in(arm.payback.classification, &Map.fetch!(classes, &1))
   end
 end
 

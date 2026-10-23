@@ -117,6 +117,10 @@ defmodule SpaceTraders.ShipyardPaybackTest do
       assert ShipyardPayback.classify(b, @v).delta_attribution == :inconclusive
     end
 
+    test "more than one acquisition is not the bounded one-Ship path" do
+      assert ShipyardPayback.classify(@b, %{@v | acquisitions: 2}).p1 == :fail
+    end
+
     test "no acquisition in either arm is not a productive pass" do
       assert ShipyardPayback.classify(@b, @b).p1 == :no_acquisition
     end
