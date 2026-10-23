@@ -2687,7 +2687,8 @@ defmodule SpaceTraders.FleetPlanning do
   end
 
   defp candidate_routes(markets, revision, objective_index, objective, snapshot) do
-    snapshot = Map.put(snapshot, :fuel_price, fuel_price(markets))
+    {price, fuel_market} = fuel_price(markets)
+    snapshot = Map.merge(snapshot, %{fuel_price: price, fuel_market: fuel_market})
 
     candidates =
       for source <- markets,
@@ -2761,7 +2762,9 @@ defmodule SpaceTraders.FleetPlanning do
     }
 
     dependencies =
-      [dependency(source, snapshot), dependency(destination, snapshot)]
+      [source, destination | List.wrap(snapshot.fuel_market)]
+      |> Enum.uniq_by(& &1.subject)
+      |> Enum.map(&dependency(&1, snapshot))
       |> Enum.sort_by(& &1.subject)
 
     required_resources = %{
@@ -2837,8 +2840,8 @@ defmodule SpaceTraders.FleetPlanning do
 
   # Net credits per Ship-hour for the best reaching Ship (`TradeEstimate`):
   # its empty leg to the source, then the loaded leg, in CRUISE.
-  defp trade_estimate(nil, _source, _destination, _units, _spread, _snapshot),
-    do: %{state: :unknown, reason: :no_ship_evidence}
+  defp trade_estimate(nil, _source, _destination, _units, _spread, snapshot),
+    do: %{state: :unknown, reason: :no_ship_evidence, fuel_price: snapshot.fuel_price}
 
   defp trade_estimate(ships, source, destination, units, spread, snapshot) do
     coordinates = snapshot.waypoint_coordinates
@@ -2867,7 +2870,7 @@ defmodule SpaceTraders.FleetPlanning do
     case for({:ok, estimate} <- estimates, do: estimate) do
       [] ->
         {:error, reason} = hd(estimates)
-        %{state: :unknown, reason: reason}
+        %{state: :unknown, reason: reason, fuel_price: snapshot.fuel_price}
 
       known ->
         known
@@ -2888,10 +2891,10 @@ defmodule SpaceTraders.FleetPlanning do
   # price for fuel bought anywhere along the trade.
   defp fuel_price(markets) do
     markets
-    |> Enum.flat_map(& &1.trade_goods)
-    |> Enum.filter(&(&1.symbol == "FUEL"))
-    |> Enum.map(& &1.purchase_price)
-    |> Enum.max(fn -> nil end)
+    |> Enum.flat_map(fn market ->
+      for good <- market.trade_goods, good.symbol == "FUEL", do: {good.purchase_price, market}
+    end)
+    |> Enum.max_by(&elem(&1, 0), fn -> {nil, nil} end)
   end
 
   # Allocation may claim only a Ship Planning found able to reach the route.

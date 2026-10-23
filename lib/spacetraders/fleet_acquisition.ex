@@ -143,6 +143,7 @@ defmodule SpaceTraders.FleetAcquisition do
            :ok <-
              FleetAllocation.admit_current_agent(current.agent_id, current.fleet_generation_id),
            {:ok, revision} <- current_purchase_authority(current),
+           :ok <- current_investment_evidence(current),
            :ok <- CreditSpending.admit(current, nil, revision),
            {:ok, sent} <- MutationAttempts.mark_sent_or_unknown(current) do
         sent
@@ -158,6 +159,41 @@ defmodule SpaceTraders.FleetAcquisition do
 
       result ->
         result
+    end
+  end
+
+  # Admission can wait past the published investment's original evidence.
+  # Reuse its exact dependencies, never restamp its Claim-only loser. Legacy
+  # execution-only publications have no Candidate evidence to reinterpret.
+  defp current_investment_evidence(attempt) do
+    commitment_id = attempt.provenance["commitment_id"]
+    commitment = if is_integer(commitment_id), do: Repo.get(Commitment, commitment_id)
+
+    candidate =
+      if commitment,
+        do: FleetAllocation.commitment_decision_episode(commitment).expectations["candidate"]
+
+    case candidate do
+      %{"validity" => %{"expires_at" => expires}, "dependencies" => dependencies}
+      when is_binary(expires) and is_list(dependencies) ->
+        agent = Repo.get!(Agent, attempt.agent_id)
+
+        with {:ok, expiry, _} <- DateTime.from_iso8601(expires),
+             :gt <- DateTime.compare(expiry, SpaceTraders.Clock.utc_now()),
+             :ok <-
+               SpaceTraders.FleetAllocation.MarketDomain.revalidate_trade_evidence(agent, [
+                 %{dependencies: dependencies}
+               ]) do
+          :ok
+        else
+          _ -> {:error, :ship_investment_evidence_unavailable}
+        end
+
+      nil ->
+        :ok
+
+      _ ->
+        {:error, :ship_investment_evidence_unavailable}
     end
   end
 

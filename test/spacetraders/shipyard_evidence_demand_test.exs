@@ -166,6 +166,97 @@ defmodule SpaceTraders.ShipyardEvidenceDemandTest do
   end
 
   for preset <- FleetStrategy.presets() do
+    test "#{preset.id}: investment evidence expiring during its presence read is never sent" do
+      fleet =
+        fixture(unquote(preset.id),
+          before_request: fn conn, agent ->
+            if conn.method == "GET" and conn.request_path == "/v2/my/ships" do
+              case SpaceTraders.FleetAcquisition.open_purchase(agent) do
+                {commitment, nil} ->
+                  candidate =
+                    FleetAllocation.commitment_decision_episode(commitment).expectations[
+                      "candidate"
+                    ]
+
+                  {:ok, expiry, _} = DateTime.from_iso8601(candidate["validity"]["expires_at"])
+                  SpaceTraders.TestClock.advance(DateTime.diff(expiry, Clock.utc_now()))
+
+                _ ->
+                  :ok
+              end
+            end
+          end
+        )
+
+      [retained] = publish_competing_trades(fleet).commitments
+      [work] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
+
+      SpaceTraders.TestClock.advance(
+        DateTime.diff(work.validity.expires_at, Clock.utc_now()) - 20
+      )
+
+      {_demand, observation} = observe_needed_offers(fleet)
+      observe_gap(fleet.agent)
+
+      assert :ok =
+               Reconciler.observe_waypoint_intelligence(
+                 fleet.agent.id,
+                 @system,
+                 CapacityDispositions.proceed()
+               )
+
+      assert [attempt] =
+               Enum.filter(
+                 SpaceTraders.MutationAttempts.list_for_agent(fleet.agent),
+                 &(&1.operation_id == "purchase-ship")
+               )
+
+      assert attempt.state == "not_sent"
+      assert attempt.sent_or_unknown_at == nil
+
+      assert Enum.any?(
+               attempt.outcomes,
+               &String.contains?(inspect(&1.evidence), "ship_investment_evidence_unavailable")
+             )
+
+      assert DateTime.diff(Clock.utc_now(), observation.observed_at) < 300
+      assert [] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
+      refute_received {:request, "POST", "/v2/my/ships"}
+      assert_received {:request, "POST", "/v2/my/ships/PROOF824-2/navigate"}
+      assert_retained(fleet, retained)
+      reconcile_acquisition(fleet)
+      assert SpaceTraders.FleetAcquisition.open_purchase(fleet.agent) == nil
+      assert_retained(fleet, retained)
+      refute_received {:unexpected_request, _}
+    end
+
+    test "#{preset.id}: a completed Shipyard observation hands off before its observer's next trip" do
+      fleet = fixture(unquote(preset.id))
+      [retained] = publish_competing_trades(fleet).commitments
+      {_demand, observation} = observe_needed_offers(fleet)
+      observe_gap(fleet.agent)
+
+      assert :ok =
+               Reconciler.observe_waypoint_intelligence(
+                 fleet.agent.id,
+                 @system,
+                 CapacityDispositions.proceed()
+               )
+
+      assert_received {:request, "POST", "/v2/my/ships"}
+      refute_received {:request, "POST", "/v2/my/ships"}
+      # The handoff never parks the probe or cancels the selected independent
+      # observation; its next claimed trip continues at this same boundary.
+      assert_received {:request, "POST", "/v2/my/ships/PROOF824-2/navigate"}
+      assert_retained(fleet, retained)
+      assert_purchase_evidence(fleet, observation)
+
+      assert {:error, :no_current_ship_claim} =
+               FleetAllocation.current_ship_claim(fleet.agent, "PROOF824-3")
+
+      refute_received {:unexpected_request, _}
+    end
+
     test "#{preset.id}: unknown reset horizon does not fence the unrelated trader's admitted buy" do
       fleet = fixture(unquote(preset.id))
       {portfolio, candidate} = publish_competing_trades(fleet, true)
@@ -595,7 +686,7 @@ defmodule SpaceTraders.ShipyardEvidenceDemandTest do
       else: portfolio
   end
 
-  defp fixture(preset) do
+  defp fixture(preset, opts \\ []) do
     operator = SpaceTraders.AgentFixtures.operator_fixture()
     scope = Scope.for_operator(operator)
     {:ok, draft} = FleetStrategy.select_preset(scope, preset)
@@ -669,6 +760,7 @@ defmodule SpaceTraders.ShipyardEvidenceDemandTest do
       )
 
     Req.Test.stub(SpaceTraders.API, fn conn ->
+      if before_request = Keyword.get(opts, :before_request), do: before_request.(conn, agent)
       send(test_pid, {:request, conn.method, conn.request_path})
       state = Elixir.Agent.get(world, & &1)
       SpaceTraders.TestClock.advance(1)

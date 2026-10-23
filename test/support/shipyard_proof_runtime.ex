@@ -124,17 +124,17 @@ defmodule SpaceTraders.ShipyardProofRuntime do
   end
 
   @doc "Matched finite control through the existing reconciliation entries, never a policy double."
-  def finite_control(world, fleet, preset, cutoff \\ DateTime.add(@t0, 48, :hour)) do
+  def finite_control(world, fleet, preset, cutoff \\ DateTime.add(@t0, 48, :hour), opts \\ []) do
     Process.put(:proof_captured_waits, [])
 
     try do
-      do_finite_control(world, fleet, preset, cutoff)
+      do_finite_control(world, fleet, preset, cutoff, opts)
     after
       Process.delete(:proof_captured_waits)
     end
   end
 
-  defp do_finite_control(world, fleet, preset, cutoff) do
+  defp do_finite_control(world, fleet, preset, cutoff, opts) do
     fixture_sources = fixture_sources()
     host_started_at = DateTime.utc_now()
 
@@ -143,13 +143,14 @@ defmodule SpaceTraders.ShipyardProofRuntime do
 
     Clock.send_at(self(), :proof_cutoff, cutoff)
     Clock.send_at(self(), :proof_world_tick, DateTime.add(@t0, 1800))
-    first = run(fn -> control_boundary(fleet) end)
+    first = run(fn -> control_boundary(fleet, opts) end)
 
     progress =
-      control_events(world, fleet, cutoff, [
+      control_events(world, fleet, cutoff, opts, [
         %{at: Clock.utc_now(), result: boundary_summary(first)}
       ])
 
+    as_of = if Keyword.get(opts, :stop_at_readiness), do: Clock.utc_now(), else: cutoff
     state = World.snapshot(world)
     {:ok, floor} = SpaceTraders.FleetExecution.credit_floor(fleet.revision)
     {code, 0} = System.cmd("git", ["rev-parse", "HEAD"])
@@ -168,7 +169,11 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       ticket: 834,
       classification: "blocked",
       run_kind:
-        if(cutoff == DateTime.add(@t0, 48, :hour), do: "matched_control_48h", else: "prefix_only"),
+        cond do
+          Keyword.get(opts, :stop_at_readiness) -> "acquisition_readiness_prefix"
+          cutoff == DateTime.add(@t0, 48, :hour) -> "matched_control_48h"
+          true -> "prefix_only"
+        end,
       limits: [
         "Positive manifest follows approved #821 payment amendment; real-owner payment safety is a separate variation.",
         "Current unmet work/Shipyard observation may recur; co-location and independent fuel-price hand-off remain #836 obligations.",
@@ -189,11 +194,11 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       strategy_revision: fleet.revision.id,
       t0: @t0,
       reset_at: state.reset_at,
-      as_of: cutoff,
+      as_of: as_of,
       execution_stopped_at: Clock.utc_now(),
       host_started_at: host_started_at,
       host_finished_at: DateTime.utc_now(),
-      account: World.account(world, cutoff),
+      account: World.account(world, as_of),
       stock_at_stop: state.routes,
       request_effects: state.requests,
       waits: Process.get(:proof_captured_waits) |> Enum.reverse(),
@@ -484,7 +489,31 @@ defmodule SpaceTraders.ShipyardProofRuntime do
     end)
   end
 
-  defp control_boundary(fleet) do
+  defp control_boundary(fleet, opts, event \\ :boot)
+
+  defp control_boundary(fleet, opts, event) when is_list(opts),
+    do: control_boundary(fleet, Keyword.get(opts, :boundary, :control), event)
+
+  defp control_boundary(fleet, :application, event) do
+    result =
+      case event do
+        :market_evidence_observed ->
+          SpaceTraders.FleetAllocation.Reconciler.observe_market_evidence(fleet.agent.id, @system)
+
+        :observation_demand_due ->
+          SpaceTraders.FleetAllocation.Reconciler.wake_due_demands(fleet.agent.id)
+
+        _ ->
+          SpaceTraders.FleetAllocation.Reconciler.observe_waypoint_intelligence(
+            fleet.agent.id,
+            @system
+          )
+      end
+
+    %{market: result, acquisition: :application_boundary}
+  end
+
+  defp control_boundary(fleet, :control, _event) do
     market = reconcile(fleet)
 
     acquisition =
@@ -506,12 +535,16 @@ defmodule SpaceTraders.ShipyardProofRuntime do
     %{market: market, acquisition: acquisition}
   end
 
-  defp control_events(world, fleet, cutoff, progress) do
+  defp control_events(world, fleet, cutoff, opts, progress) do
     settle_ships()
     # The existing scheduler is the only owner of demand due/retry times.
     if pid = Process.whereis(SpaceTraders.Evidence.DemandScheduler), do: :sys.get_state(pid)
 
-    if DateTime.compare(Clock.utc_now(), cutoff) != :lt do
+    ready? =
+      Keyword.get(opts, :stop_at_readiness, false) and
+        match?({:ok, _}, SpaceTraders.Fleet.owned_ship(fleet.agent, "PROOF824-3"))
+
+    if ready? or DateTime.compare(Clock.utc_now(), cutoff) != :lt do
       Enum.reverse(progress)
     else
       receive do
@@ -525,7 +558,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
           if DateTime.compare(next, cutoff) != :gt,
             do: Clock.send_at(self(), :proof_world_tick, next)
 
-          control_events(world, fleet, cutoff, progress)
+          control_events(world, fleet, cutoff, opts, progress)
 
         {kind, agent_id, _subject}
         when kind in [
@@ -533,7 +566,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
                :waypoint_intelligence_observed,
                :observation_demand_due
              ] and agent_id == fleet.agent.id ->
-          result = run(fn -> control_boundary(fleet) end)
+          result = run(fn -> control_boundary(fleet, opts, kind) end)
           work = SpaceTraders.FleetAllocation.ship_bound_unmet_work(fleet.agent)
 
           entry = %{
@@ -558,14 +591,14 @@ defmodule SpaceTraders.ShipyardProofRuntime do
             )
           end
 
-          control_events(world, fleet, cutoff, [entry | progress])
+          control_events(world, fleet, cutoff, opts, [entry | progress])
 
         {:observation_demands_changed, _} ->
-          control_events(world, fleet, cutoff, progress)
+          control_events(world, fleet, cutoff, opts, progress)
       after
         0 ->
           next_event()
-          control_events(world, fleet, cutoff, progress)
+          control_events(world, fleet, cutoff, opts, progress)
       end
     end
   end

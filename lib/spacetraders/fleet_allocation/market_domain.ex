@@ -55,18 +55,32 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
   capacity deferral, unknown availability, a Neutral Wait minted only by
   Fleet Allocation, or a rejected publication recorded as a durable Strategy
   Decision Episode with its reason. Each emits bounded G2 telemetry.
+
+  The Reconciler may supply its existing acquisition step as a completion
+  handoff. It runs only after publication, before reusing a completed Shipyard
+  observer for another observation, and never ahead of newly selected trade.
+  A true `:acquisition_handoff` result tells the caller not to run it twice.
   """
   def reconcile(
         %Scope{} = scope,
         %AgentRecord{} = agent,
         %Revision{} = revision,
         system_symbol,
-        capacity
+        capacity,
+        observation_handoff \\ nil
       )
       when is_binary(system_symbol) do
     with {:ok, _} <- SpaceTraders.OperatorAuthority.authorize(scope),
          %Generation{} = generation <- FleetAllocation.active_generation(agent) do
-      reconcile_current_market_domain(scope, agent, revision, system_symbol, capacity, generation)
+      reconcile_current_market_domain(
+        scope,
+        agent,
+        revision,
+        system_symbol,
+        capacity,
+        generation,
+        observation_handoff
+      )
     else
       _ -> {:error, :current_fleet_unavailable}
     end
@@ -78,7 +92,8 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
          revision,
          system_symbol,
          capacity,
-         generation
+         generation,
+         observation_handoff
        ) do
     reconciled = reconcile_revision_change(scope, revision, generation)
     current = FleetAllocation.current_portfolio(scope, agent)
@@ -89,7 +104,15 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
           {reconciled, %{}}
 
         FleetCapacity.proceed?(capacity) ->
-          allocate_market_domain(scope, agent, revision, system_symbol, current, generation)
+          allocate_market_domain(
+            scope,
+            agent,
+            revision,
+            system_symbol,
+            current,
+            generation,
+            observation_handoff
+          )
 
         true ->
           {capacity_deferral(agent, capacity, current), %{}}
@@ -120,7 +143,15 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
       else: {:ok, Map.put(deferral, :action, :deferred_for_capacity)}
   end
 
-  defp allocate_market_domain(scope, agent, revision, system, current, generation) do
+  defp allocate_market_domain(
+         scope,
+         agent,
+         revision,
+         system,
+         current,
+         generation,
+         observation_handoff
+       ) do
     settling = if generation, do: FleetAllocation.settling_commitments(generation.id), else: []
     resume_awaiting_sells(agent, current, settling)
     occupancy = domain_occupancy(agent, current, settling)
@@ -147,7 +178,7 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
           if planned.intelligence, do: planned.intelligence.observation_demands, else: []
 
         held = %{occupancy: occupancy, availability: availability, free: free}
-        decide(scope, agent, revision, current, held, planning, demands)
+        decide(scope, agent, revision, current, held, planning, demands, observation_handoff)
       else
         {:error, reason} -> {{:error, reason}, %{}}
       end
@@ -156,7 +187,7 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
 
   # `held` is the boundary's one read of what the Fleet already holds: the
   # occupancy of current work, governed availability and the free Claims.
-  defp decide(scope, agent, revision, current, held, planning, demands) do
+  defp decide(scope, agent, revision, current, held, planning, demands, observation_handoff) do
     %{occupancy: occupancy, availability: availability, free: free} = held
 
     candidates = Enum.flat_map(planning, & &1.candidate_contributions)
@@ -200,13 +231,17 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
           selection: selection,
           decision: domain_decision(planning, candidates, selection.commitments),
           dispatch: dispatch,
-          planning: planning
+          planning: planning,
+          completed_shipyard_intelligence: occupancy.completed_shipyard_intelligence
         }
 
         result =
           case publish(scope, agent, revision, current, plan) do
-            {:published, portfolio} -> activate_published(portfolio, agent, plan)
-            other -> other
+            {:published, portfolio} ->
+              activate_published(portfolio, agent, plan, observation_handoff)
+
+            other ->
+              other
           end
 
         {result, Map.put(counts, :selected, length(selection.commitments))}
@@ -339,12 +374,19 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
   # Only after durable publication: the newly selected Commitments activate
   # their root Intents through Ship Execution, one Commitment at a time;
   # retained Commitments keep the work they already hold.
-  defp activate_published(portfolio, agent, plan) do
+  defp activate_published(portfolio, agent, plan, observation_handoff) do
     commitments =
       for proposal <- plan.selection.commitments,
           persisted <- portfolio.commitments,
           persisted.candidate_id == proposal.candidate_id,
           do: persisted
+
+    # The caller's existing acquisition step can consume a completed Shipyard
+    # observation before this same observer starts its next, unrelated trip.
+    # Market selection/publication already protected all work. Never delay a
+    # newly selected trade or an already active unrelated Intent for this handoff.
+    handoff? = is_function(observation_handoff, 0) and observation_handoff?(plan, commitments)
+    if handoff?, do: observation_handoff.()
 
     dispatched =
       Map.new(commitments, fn commitment ->
@@ -359,8 +401,24 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
        commitments: commitments,
        dispatched: dispatched,
        selection: plan.selection,
-       planning: plan.planning
+       planning: plan.planning,
+       acquisition_handoff: handoff?
      }}
+  end
+
+  defp observation_handoff?(plan, commitments) do
+    completed_ships =
+      for commitment <- plan.released,
+          MapSet.member?(plan.completed_shipyard_intelligence, commitment.id),
+          ship <- commitment.claims,
+          do: ship
+
+    Enum.all?(commitments, fn commitment ->
+      match?({:intelligence, _, _}, plan.dispatch[commitment.candidate_id])
+    end) and
+      Enum.any?(commitments, fn commitment ->
+        Enum.any?(commitment.claims, &(&1 in completed_ships))
+      end)
   end
 
   # Dispatch failures stay in the result (and the Reconciler's log): the
@@ -469,10 +527,14 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
       Repo.all(
         from intent in Intent,
           where: intent.fleet_commitment_id in ^ids and intent.type == "acquire_intelligence",
-          select: {intent.fleet_commitment_id, intent.status}
+          select: {intent.fleet_commitment_id, intent.status, intent.parameters["subject_type"]}
       )
 
-    completed_intelligence = for {id, "completed"} <- intelligence, into: MapSet.new(), do: id
+    completed_intelligence = for {id, "completed", _} <- intelligence, into: MapSet.new(), do: id
+
+    completed_shipyard_intelligence =
+      for {id, "completed", "shipyard"} <- intelligence, into: MapSet.new(), do: id
+
     intelligence_ids = MapSet.new(intelligence, &elem(&1, 0))
 
     {releasable, retained} =
@@ -490,6 +552,7 @@ defmodule SpaceTraders.FleetAllocation.MarketDomain do
       retained: retained,
       releasable: releasable,
       completed_intelligence: completed_intelligence,
+      completed_shipyard_intelligence: completed_shipyard_intelligence,
       occupied: MapSet.new(Enum.flat_map(retained ++ settling, & &1.claims) ++ intent_ships)
     }
   end
