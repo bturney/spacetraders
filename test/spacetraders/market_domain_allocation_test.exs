@@ -796,6 +796,56 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert [] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
     end
 
+    for change <- [:replacement, :invalidation] do
+      test "a third-Market FUEL #{change} invalidates its original Claim-only work" do
+        fleet = fleet([@frigate])
+        listing(fleet.agent, "X1-A3", 50, 24)
+        observed_at = DateTime.add(DateTime.utc_now(), -1700)
+
+        {fuel, _} =
+          retained_market_listing(
+            fleet.agent,
+            @system,
+            "X1-FUEL",
+            [
+              %{symbol: "FUEL", purchase_price: 100, sell_price: 90, trade_volume: 40}
+            ],
+            observed_at: observed_at
+          )
+
+        stub_game(fleet.agent, [@frigate], refuse_ship_reads: true)
+        assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+        assert [_ | _] = work = FleetAllocation.ship_bound_unmet_work(fleet.agent)
+
+        for candidate <- work do
+          assert candidate.expected_outcomes["trade_estimate"]["fuel_price"] == 100
+
+          assert Enum.any?(
+                   candidate.dependencies,
+                   &(&1["evidence_id"] == "evidence-observation:#{fuel.id}")
+                 )
+
+          assert candidate.validity.expires_at == DateTime.add(fuel.observed_at, 1800)
+        end
+
+        assert [] =
+                 FleetAllocation.ship_bound_unmet_work(
+                   fleet.agent,
+                   DateTime.add(fuel.observed_at, 1801)
+                 )
+
+        if unquote(change) == :replacement do
+          retained_market_listing(fleet.agent, @system, "X1-FUEL", [
+            %{symbol: "FUEL", purchase_price: 100, sell_price: 90, trade_volume: 40}
+          ])
+        else
+          assert {:ok, _} = Intelligence.invalidate(fleet.agent, :market, @system, "X1-FUEL")
+        end
+
+        assert [] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
+      end
+    end
+
     test "only the latest Market Episode contributes, not older losers or another domain" do
       fleet = fleet([@frigate])
       listing(fleet.agent, "X1-A3", 50, 24)
