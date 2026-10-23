@@ -25,14 +25,23 @@ defmodule SpaceTraders.ShipyardProofWorld do
         :payment_safety -> 20
       end
 
+    credits = Keyword.get(opts, :credits, 400_000)
+    reset_at = Keyword.get(opts, :reset_at, DateTime.add(@t0, 120, :hour))
+    destination_sell = Keyword.get(opts, :destination_sell, 1500)
+    rivals = Keyword.get(opts, :rivals, [])
+
     Agent.start_link(fn ->
       initial = %{
-        credits: 400_000,
+        credits: credits,
         ships: %{
           "PROOF824-1" => ship("PROOF824-1", :trader),
           "PROOF824-2" => ship("PROOF824-2", :probe)
         },
-        routes: Map.new(~w(IRON COPPER), &{&1, %{source_units: 1600, demand_units: 1600}}),
+        routes:
+          Map.new(
+            ~w(IRON COPPER),
+            &{&1, %{source_units: 1600, demand_units: if(&1 in rivals, do: 0, else: 1600)}}
+          ),
         replenished_at: @t0,
         cargo_basis: %{},
         offer_stock: 1
@@ -42,8 +51,11 @@ defmodule SpaceTraders.ShipyardProofWorld do
         initial: initial,
         scenario: scenario,
         transaction_maximum: maximum,
-        low_credits: 400_000,
-        reset_at: DateTime.add(@t0, 120, :hour),
+        low_credits: credits,
+        initial_credits: credits,
+        destination_sell: destination_sell,
+        rivals: rivals,
+        reset_at: reset_at,
         effects: [],
         requests: []
       })
@@ -102,7 +114,7 @@ defmodule SpaceTraders.ShipyardProofWorld do
       |> Enum.sum_by(&max(-&1.signed_cash, 0))
     end
 
-    observed_credits = if last, do: last.after.credits, else: 400_000
+    observed_credits = if last, do: last.after.credits, else: state.initial_credits
 
     cutoff_state = Map.merge(state, if(last, do: last.after, else: state.initial))
     cutoff_state = advance(cutoff_state, cutoff)
@@ -116,14 +128,14 @@ defmodule SpaceTraders.ShipyardProofWorld do
       fuel_outlays: outlays.("/refuel"),
       acquisition_outlays: outlays.("/my/ships"),
       unknown_monetary_effects: [],
-      unexplained_cash: observed_credits - 400_000 - cash,
+      unexplained_cash: observed_credits - state.initial_credits - cash,
       low_credits:
         effects
-        |> Enum.map_reduce(400_000, fn e, credits ->
+        |> Enum.map_reduce(state.initial_credits, fn e, credits ->
           {credits + e.signed_cash, credits + e.signed_cash}
         end)
         |> elem(0)
-        |> Enum.min(fn -> 400_000 end),
+        |> Enum.min(fn -> state.initial_credits end),
       ships: ships,
       cargo_basis: cargo_basis,
       stock: cutoff_state.routes,
@@ -163,10 +175,10 @@ defmodule SpaceTraders.ShipyardProofWorld do
           ]
 
         "X1-UX81-A2" ->
-          [listing.("IRON", "IMPORT", 1600, 1500, :demand_units)]
+          [listing.("IRON", "IMPORT", 1600, state.destination_sell, :demand_units)]
 
         "X1-UX81-A3" ->
-          [listing.("COPPER", "IMPORT", 1600, 1500, :demand_units)]
+          [listing.("COPPER", "IMPORT", 1600, state.destination_sell, :demand_units)]
       end ++ [good("FUEL", "EXCHANGE", 100, 90)]
 
     of_type = fn type ->
@@ -611,7 +623,15 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
     routes =
       Map.new(state.routes, fn {trade, route} ->
-        {trade, Map.new(route, fn {side, units} -> {side, min(1600, units + periods * 40)} end)}
+        # Rival Players consume replenished destination demand before the bot
+        # can observe or admit it: a named input, not a bot-side rule.
+        rival? = trade in state.rivals
+
+        {trade,
+         Map.new(route, fn
+           {:demand_units, _} when rival? -> {:demand_units, 0}
+           {side, units} -> {side, min(1600, units + periods * 40)}
+         end)}
       end)
 
     %{state | routes: routes, replenished_at: DateTime.add(state.replenished_at, periods * 1800)}
