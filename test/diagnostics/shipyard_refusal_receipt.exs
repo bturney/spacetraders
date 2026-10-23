@@ -5,7 +5,7 @@
 # The unchanged B clock contradiction is retained, never repaired here.
 #
 #   SHIPYARD_PROOF_PRESET=steady_growth SHIPYARD_PROOF_RECEIPTS=dir \
-#     MIX_ENV=test mix run --no-start test/diagnostics/shipyard_productive_investment.exs
+#     MIX_ENV=test mix run --no-start test/diagnostics/shipyard_refusal_receipt.exs
 defmodule SpaceTraders.ShipyardRefusalReceipt do
   import ExUnit.Assertions
   alias SpaceTraders.{Clock, Repo, ShipyardProofRuntime, ShipyardProofWorld, TestClock}
@@ -100,8 +100,40 @@ defmodule SpaceTraders.ShipyardRefusalReceipt do
               e.fleet_generation_id == ^fleet.generation.id and
                 e.selection_kind == :acquisition_refused,
             order_by: e.id,
-            select: %{reason: e.rejection_reason, count: e.observation_count}
+            select: %{
+              id: e.id,
+              reason: e.rejection_reason,
+              count: e.observation_count,
+              expectations: e.expectations,
+              last_observed_at: e.last_observed_at
+            }
         )
+
+      # A two-hour no-purchase result is not necessarily a funding refusal.
+      # Preserve every original Attempt, including not_sent, and distinguish
+      # later purchases funded by actual earned receipts. This is read-only
+      # proof accounting, not a new runtime productive-funding policy.
+      funding_refusals = Enum.filter(refusals, &(&1.reason == "insufficient_acquisition_credits"))
+
+      purchases =
+        for attempt <- result.attempts,
+            attempt.operation_id == "purchase-ship" do
+          episode =
+            Enum.find(result.decisions, &(&1.id == attempt.provenance["decision_episode_id"]))
+
+          valuation = episode.expectations["valuation"]
+
+          %{
+            attempt: attempt,
+            episode_id: episode.id,
+            available_credits: valuation["available_credits"],
+            total_exposure: valuation["total_exposure"],
+            productive_envelope: 60_000,
+            remainder_after_exposure:
+              valuation["available_credits"] - valuation["total_exposure"],
+            evidence_references: episode.evidence_references
+          }
+        end
 
       summary = %{
         ticket: 838,
@@ -110,6 +142,15 @@ defmodule SpaceTraders.ShipyardRefusalReceipt do
         floor: result.floor,
         code_revision: result.code_revision,
         refusals: refusals,
+        eligible_funding_refusal_episode_ids: Enum.map(funding_refusals, & &1.id),
+        funding_classification:
+          if(funding_refusals == [], do: "inconclusive", else: "eligible_boundary_proven"),
+        purchase_history: purchases,
+        productive_funding_gap:
+          Enum.any?(purchases, fn purchase ->
+            purchase.attempt.sent_or_unknown_at != nil and
+              purchase.remainder_after_exposure < purchase.productive_envelope
+          end),
         acquisition_outlays: result.account.acquisition_outlays,
         low_credits: result.account.low_credits,
         net_cash: result.account.net_cash,
@@ -118,6 +159,11 @@ defmodule SpaceTraders.ShipyardRefusalReceipt do
           Enum.count(result.request_effects, &(&1.method == "POST" and &1.path == "/v2/my/ships")),
         cycles: length(result.earnings)
       }
+
+      assert result.account.unexplained_cash == 0
+      assert result.account.credits == 200_000 + result.account.net_cash
+      assert result.account.low_credits >= result.floor
+      refute Enum.any?(result.request_effects, &Map.has_key?(&1, :failure))
 
       directory = System.fetch_env!("SHIPYARD_PROOF_RECEIPTS")
       File.mkdir_p!(directory)

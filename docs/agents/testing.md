@@ -39,6 +39,22 @@ MIX_ENV=test SHIPYARD_PROOF_PRESET=steady_growth SHIPYARD_PROOF_ARM=before_buy S
 The ordinary `fleet_intents_test.exs` destination-spread regression covers the
 irreversible-buy guard; it does not substitute for the four runtime receipts.
 
+#838's ordinary `shipyard_refusal_test.exs` R1 tracer proves safety, not a
+valuation pass when no eligible current loser survives. To demand the exact R1
+acceptance evidence (and fail explicitly if inconclusive), run:
+
+```sh
+SHIPYARD_PROOF_REQUIRE_R1=true SHIPYARD_PROOF_RECEIPTS=/tmp/opencode/838-receipts mix test test/spacetraders/shipyard_refusal_test.exs --seed 0 --max-failures 1
+```
+
+R2's ordinary tracer stops at an actual eligible funding refusal, if reached;
+otherwise retains the two-hour trace as inconclusive. Set
+`SHIPYARD_PROOF_REQUIRE_R2=true` to require that exact evidence. The opt-in
+`shipyard_refusal_receipt.exs` retains the full two-hour history, including
+not-sent recovery and later earned-credit purchases; no-purchase alone is not
+funding evidence. Run with `MIX_ENV=test`, `SHIPYARD_PROOF_PRESET` and
+`SHIPYARD_PROOF_RECEIPTS` as for the other standalone diagnostics.
+
 ## Release and deployment verification
 
 Separate required CI job. The deployment-script regression suite uses isolated
