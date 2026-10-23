@@ -2,6 +2,8 @@ defmodule SpaceTraders.ShipyardPurchaseRecoveryTest do
   # Independently committed state must survive the owned runtime restart.
   use ExUnit.Case, async: false
 
+  import Ecto.Query
+
   alias Ecto.Adapters.SQL.Sandbox
 
   alias SpaceTraders.{
@@ -66,6 +68,89 @@ defmodule SpaceTraders.ShipyardPurchaseRecoveryTest do
     :ok
   end
 
+  test "committed fixture teardown removes its causal notifications and preserves unrelated rows" do
+    topic = "unrelated:shipyard-fixture:#{System.unique_integer([:positive])}"
+
+    assert {:ok, :unrelated} =
+             SpaceTraders.Outbox.publish(
+               %{topic: topic, event: "unrelated_fixture", payload: %{"portfolio_id" => -1}},
+               fn -> :unrelated end
+             )
+
+    sentinel = Repo.one!(from n in SpaceTraders.Outbox.Notification, where: n.topic == ^topic)
+    on_exit(fn -> Repo.delete!(sentinel) end)
+    baseline = notification_snapshot()
+    world = start_supervised!({World, []})
+    controller = self()
+    Req.Test.stub(SpaceTraders.API, fn conn -> World.reply(world, conn, controller) end)
+
+    Req.Test.allow(SpaceTraders.API, self(), fn ->
+      DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
+      |> Enum.map(fn {_, pid, _, _} -> pid end)
+    end)
+
+    fleet = Runtime.fresh_generation(world, "steady_growth")
+
+    on_exit(fn ->
+      for symbol <- @symbols, do: SpaceTraders.Quiesced.stop_ship(symbol)
+      assert {:ok, _} = Runtime.cleanup_control_fixture(fleet)
+    end)
+
+    assert {:ok, %{action: :published}} = Runtime.run(fn -> Runtime.reconcile(fleet) end)
+    for symbol <- @symbols, do: SpaceTraders.Quiesced.stop_ship(symbol)
+
+    portfolios =
+      Repo.all(
+        from p in FleetAllocation.Portfolio,
+          where: p.fleet_generation_id == ^fleet.generation.id,
+          select: p.id
+      )
+
+    episodes =
+      Repo.all(
+        from e in FleetAllocation.StrategyDecisionEpisode,
+          where: e.fleet_generation_id == ^fleet.generation.id,
+          select: e.id
+      )
+
+    before_cleanup = notification_snapshot()
+    created = Map.drop(before_cleanup, Map.keys(baseline))
+
+    assert Enum.any?(created, fn {_id, row} ->
+             row.event == "fleet_commitment_portfolio_published" and
+               row.payload["portfolio_id"] in portfolios and
+               row.payload["decision_episode_id"] in episodes and
+               not Map.has_key?(row.payload, "agent_id") and
+               not Map.has_key?(row.payload, "fleet_generation_id")
+           end)
+
+    assert {:ok, _} = Runtime.cleanup_control_fixture(fleet)
+    after_cleanup = notification_snapshot()
+    write_outbox_receipt(fleet, portfolios, episodes, baseline, before_cleanup, after_cleanup)
+    assert Map.keys(Map.drop(after_cleanup, Map.keys(baseline))) == []
+    assert Map.take(after_cleanup, Map.keys(baseline)) == baseline
+
+    # The next ordinary publication/rollback must add only its own causal row,
+    # even when unrelated persisted baseline notifications already exist.
+    assert {:ok, :next} =
+             SpaceTraders.Outbox.publish(
+               %{topic: topic, event: "after_fixture", payload: %{}},
+               fn -> :next end
+             )
+
+    [next] = notification_snapshot() |> Map.drop(Map.keys(baseline)) |> Map.values()
+    assert next.event == "after_fixture"
+    Repo.delete!(next)
+
+    assert {:error, :forced_failure} =
+             SpaceTraders.Outbox.publish(
+               %{topic: topic, event: "rolled_back", payload: %{}},
+               fn -> Repo.rollback(:forced_failure) end
+             )
+
+    assert notification_snapshot() == baseline
+  end
+
   for preset <- ~w(steady_growth charted_expansion) do
     @preset preset
     test "#{preset}: a normally admitted lost purchase recovers its original Attempt after restart" do
@@ -95,12 +180,12 @@ defmodule SpaceTraders.ShipyardPurchaseRecoveryTest do
         |> Enum.map(fn {_, pid, _, _} -> pid end)
       end)
 
+      notification_baseline = notification_snapshot()
       fleet = Runtime.fresh_generation(world, @preset)
       Elixir.Agent.update(context, fn _ -> fleet end)
 
       on_exit(fn ->
-        for symbol <- @symbols, do: SpaceTraders.Quiesced.stop_ship(symbol)
-        assert {:ok, _} = Runtime.cleanup_control_fixture(fleet)
+        assert_fixture_notification_cleanup(fleet, notification_baseline)
       end)
 
       refute Evidence.latest_observation(fleet.agent, "shipyard:X1-UX81:X1-UX81-A1")
@@ -288,6 +373,74 @@ defmodule SpaceTraders.ShipyardPurchaseRecoveryTest do
         MutationAttempts.list_for_agent(fleet.agent),
         &(&1.operation_id == "purchase-ship")
       )
+
+  defp notification_snapshot do
+    Map.new(Repo.all(SpaceTraders.Outbox.Notification), &{&1.id, &1})
+  end
+
+  defp assert_fixture_notification_cleanup(fleet, baseline) do
+    for symbol <- @symbols, do: SpaceTraders.Quiesced.stop_ship(symbol)
+
+    portfolios =
+      Repo.all(
+        from p in FleetAllocation.Portfolio,
+          where: p.fleet_generation_id == ^fleet.generation.id,
+          select: p.id
+      )
+
+    episodes =
+      Repo.all(
+        from e in FleetAllocation.StrategyDecisionEpisode,
+          where: e.fleet_generation_id == ^fleet.generation.id,
+          select: e.id
+      )
+
+    before_cleanup = notification_snapshot()
+    assert {:ok, _} = Runtime.cleanup_control_fixture(fleet)
+    after_cleanup = notification_snapshot()
+    write_outbox_receipt(fleet, portfolios, episodes, baseline, before_cleanup, after_cleanup)
+    assert Map.keys(Map.drop(after_cleanup, Map.keys(baseline))) == []
+    assert Map.take(after_cleanup, Map.keys(baseline)) == baseline
+  end
+
+  defp write_outbox_receipt(fleet, portfolios, episodes, baseline, before_cleanup, after_cleanup) do
+    if directory = System.get_env("SHIPYARD_OUTBOX_EVIDENCE") do
+      File.mkdir_p!(directory)
+
+      summarize = fn rows ->
+        Map.new(rows, fn {id, row} ->
+          {id,
+           %{
+             topic: row.topic,
+             event: row.event,
+             payload_owner_keys:
+               Map.take(
+                 row.payload,
+                 ~w(agent_id fleet_generation_id portfolio_id decision_episode_id)
+               ),
+             payload_fingerprint: Evidence.fingerprint(row.payload),
+             delivered_at: row.delivered_at
+           }}
+        end)
+      end
+
+      data = %{
+        operator: fleet.scope.operator.id,
+        agent: fleet.agent.id,
+        generation: fleet.generation.id,
+        portfolio_ids: portfolios,
+        episode_ids: episodes,
+        baseline: summarize.(baseline),
+        before_cleanup: summarize.(before_cleanup),
+        after_cleanup: summarize.(after_cleanup)
+      }
+
+      File.write!(
+        Path.join(directory, "fixture-outbox-#{fleet.generation.id}.json"),
+        Jason.encode!(Runtime.receipt_json(data), pretty: true)
+      )
+    end
+  end
 
   defp acquisition(fleet),
     do:

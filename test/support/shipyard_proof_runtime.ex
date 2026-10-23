@@ -479,7 +479,16 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       end
 
       Repo.query!(
-        "DELETE FROM outbox_notifications WHERE payload->>'agent_id' = $1 OR payload->>'fleet_generation_id' = $2",
+        """
+        DELETE FROM outbox_notifications
+        WHERE payload->>'agent_id' = $1 OR payload->>'fleet_generation_id' = $2
+          OR payload->>'portfolio_id' IN (
+            SELECT id::text FROM fleet_commitment_portfolios WHERE fleet_generation_id = $2::bigint
+          )
+          OR payload->>'decision_episode_id' IN (
+            SELECT id::text FROM strategy_decision_episodes WHERE fleet_generation_id = $2::bigint
+          )
+        """,
         [to_string(fleet.agent.id), to_string(fleet.generation.id)]
       )
 
