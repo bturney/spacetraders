@@ -136,7 +136,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
 
   defp do_finite_control(world, fleet, preset, cutoff) do
     fixture_sources = fixture_sources()
-    World.frozen_debit(world)
+    host_started_at = DateTime.utc_now()
 
     for topic <- ~w(fleet_market_evidence fleet_intelligence_evidence observation_demands),
         do: Phoenix.PubSub.subscribe(SpaceTraders.PubSub, topic)
@@ -167,9 +167,11 @@ defmodule SpaceTraders.ShipyardProofRuntime do
     %{
       ticket: 834,
       classification: "blocked",
+      run_kind:
+        if(cutoff == DateTime.add(@t0, 48, :hour), do: "matched_control_48h", else: "prefix_only"),
       limits: [
-        "Frozen external debit is authoritatively accounted but no legitimate disjoint runtime work/effect provenance was established; NOT a funding-safety proof.",
-        "Claim-only loser source-refresh/validity limitation must not be bypassed.",
+        "Positive manifest follows approved #821 payment amendment; real-owner payment safety is a separate variation.",
+        "Current unmet work/Shipyard observation may recur; co-location and independent fuel-price hand-off remain #836 obligations.",
         "Controlled finite world only; not acquisition qualification, cash superiority, or Gate 0."
       ],
       code_revision: String.trim(code),
@@ -189,6 +191,8 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       reset_at: state.reset_at,
       as_of: cutoff,
       execution_stopped_at: Clock.utc_now(),
+      host_started_at: host_started_at,
+      host_finished_at: DateTime.utc_now(),
       account: World.account(world, cutoff),
       stock_at_stop: state.routes,
       request_effects: state.requests,
@@ -198,7 +202,6 @@ defmodule SpaceTraders.ShipyardProofRuntime do
         |> Map.take(
           ~w(observed_at in_flight deferred retry_after_until outage protocol_rejections scoped_failures)a
         ),
-      pending_debit: state.pending_debit,
       progress: progress,
       decisions:
         Enum.map(
@@ -303,7 +306,8 @@ defmodule SpaceTraders.ShipyardProofRuntime do
 
   def manifest do
     %{
-      version: "821-finite-control-834-v2",
+      version: "821-finite-control-834-approved-payment-v3",
+      amendment: "https://github.com/bturney/spacetraders/issues/821#issuecomment-6355891158",
       t0: @t0,
       hours: 48,
       reset_hours: 120,
@@ -322,10 +326,11 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       offer_stock: 1,
       ship_price: 100_000,
       modification_fee: 2000,
-      uncertain_bound: 25_000,
-      independent_debit: 20_000,
-      debit_at_seconds: 3600,
-      debit_runtime_provenance: "NOT ESTABLISHED: blocks canonical protected-funding claim",
+      external_liability: false,
+      selected_work_initial_reservation: 50_000,
+      acquisition_preparation_bound: 135_000,
+      first_cycle_envelope: 60_000,
+      worst_preset_funding: 320_000,
       fractional_credit_quote: "blocked instead of rounding; canonical 40-unit effects exact"
     }
   end
@@ -345,12 +350,103 @@ defmodule SpaceTraders.ShipyardProofRuntime do
 
       File.write!(
         Path.join(directory, "834-#{preset}.json"),
-        Jason.encode!(receipt, pretty: true)
+        receipt |> receipt_json() |> Jason.encode!(pretty: true)
       )
     end
 
     :ok
   end
+
+  @doc "Separate amended payment case: real selected owner, no joint-positive liability."
+  def write_payment_receipt(world, fleet, preset, unknown) do
+    {:ok, floor} = SpaceTraders.FleetExecution.credit_floor(fleet.revision)
+    attempts = SpaceTraders.MutationAttempts.list_for_agent(fleet.agent)
+    purchase = Enum.find(attempts, &(&1.id == unknown.attempt.id))
+    state = World.snapshot(world)
+    {code, 0} = System.cmd("git", ["rev-parse", "HEAD"])
+
+    receipt =
+      %{
+        ticket: 834,
+        scenario: "separate_real_owner_payment_safety",
+        classification: "bounded owner restart/protection/settlement; not all #842 S4",
+        code_revision: String.trim(code),
+        fixture_sources: fixture_sources(),
+        fixture_revision:
+          System.get_env("SHIPYARD_PROOF_FIXTURE_REVISION", "uncommitted; use source hashes"),
+        manifest:
+          Map.merge(manifest(), %{
+            scenario: "separate_real_owner_payment_safety",
+            transaction_maximum: 20
+          }),
+        amendment: manifest().amendment,
+        preset: preset,
+        floor: floor,
+        agent: fleet.agent.symbol,
+        generation: fleet.generation.id,
+        strategy_revision: fleet.revision.id,
+        variation: %{
+          transaction_maximum: 20,
+          unit_price: 1000,
+          actual_charge: 20_000,
+          calibrated_bound: 25_000
+        },
+        unknown: unknown,
+        settled_at: Clock.utc_now(),
+        settled_attempt:
+          Map.take(
+            purchase,
+            ~w(id state prepared_evidence provenance prepared_at sent_or_unknown_at sequence)a
+          ),
+        outcomes:
+          Enum.map(purchase.outcomes, &Map.take(&1, ~w(classification recorded_at evidence)a)),
+        account: World.account(world, Clock.utc_now()),
+        request_effects: state.requests,
+        realisations:
+          Repo.all(
+            Ecto.Query.from(r in SpaceTraders.CreditCalibration.Realization,
+              where: r.agent_id == ^fleet.agent.id
+            )
+          )
+          |> Enum.map(
+            &Map.take(
+              &1,
+              ~w(id mutation_attempt_id operation_id unit_price units worst_case_exposure realized_charge credits_after within_bound)a
+            )
+          ),
+        deferred:
+          "#842 full process/application restart, cutoff/unknown-receipt/reset and repeated exposure matrix remains separate"
+      }
+      |> receipt_json()
+
+    # Encode even without persistence: a blocked owner's structured facts must
+    # remain exportable, including the original IntentBlocker.
+    json = Jason.encode!(receipt, pretty: true)
+
+    if directory = System.get_env("SHIPYARD_PROOF_RECEIPTS") do
+      File.mkdir_p!(directory)
+      File.write!(Path.join(directory, "834-payment-safety-#{preset}.json"), json)
+    end
+
+    receipt
+  end
+
+  # Preserve structured blockers/diagnostics in B as well as V; never discard a
+  # blocked Intent just because its struct does not derive Jason.Encoder.
+  def receipt_json(%DateTime{} = time), do: DateTime.to_iso8601(time)
+  def receipt_json(%MapSet{} = set), do: set |> Enum.to_list() |> receipt_json()
+  def receipt_json(%_{} = struct), do: struct |> Map.from_struct() |> receipt_json()
+
+  def receipt_json(map) when is_map(map) do
+    Map.new(map, fn {key, value} ->
+      key = if is_binary(key) or is_atom(key), do: key, else: inspect(key)
+      {key, receipt_json(value)}
+    end)
+  end
+
+  def receipt_json(list) when is_list(list), do: Enum.map(list, &receipt_json/1)
+  def receipt_json(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> receipt_json()
+  def receipt_json(value), do: value
 
   @doc "Clean only the committed diagnostic's installation, after owned runtime children stop."
   def cleanup_control_fixture(fleet) do
@@ -556,7 +652,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
             )
           end),
         deferred_scope:
-          "#834: finite markets, offer stock, disjoint uncertain-debit event and matched controls; this slice accounts only two ordinary trades, not acquisition funding"
+          "#834 owns amended finite controls and a separately labeled real-owner payment safety variation; these two ordinary trips do not prove acquisition funding"
       }
 
       File.mkdir_p!(directory)

@@ -16,7 +16,15 @@ defmodule SpaceTraders.ShipyardProofWorld do
   @source "X1-UX81-A1"
   @coordinates %{"X1-UX81-A1" => {0, 0}, "X1-UX81-A2" => {62, 0}, "X1-UX81-A3" => {0, 62}}
 
-  def start_link(_opts) do
+  def start_link(opts) do
+    scenario = Keyword.get(opts, :scenario, :positive)
+
+    maximum =
+      case scenario do
+        :positive -> 40
+        :payment_safety -> 20
+      end
+
     Agent.start_link(fn ->
       initial = %{
         credits: 400_000,
@@ -32,10 +40,11 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
       Map.merge(initial, %{
         initial: initial,
+        scenario: scenario,
+        transaction_maximum: maximum,
         low_credits: 400_000,
         reset_at: DateTime.add(@t0, 120, :hour),
         effects: [],
-        pending_debit: nil,
         requests: []
       })
     end)
@@ -49,26 +58,6 @@ defmodule SpaceTraders.ShipyardProofWorld do
   end
 
   def market(world, symbol), do: market_from(snapshot(world), symbol)
-
-  @doc "The contract's exogenous liability; not an application Reservation or proof of admission."
-  def frozen_debit(world) do
-    Agent.update(world, fn state ->
-      if state.pending_debit, do: raise("proof debit already declared")
-
-      %{
-        state
-        | pending_debit: %{
-            id: "821-frozen-independent-debit",
-            bound: 25_000,
-            actual: 20_000,
-            due_at: DateTime.add(@t0, 1, :hour),
-            settled_at: nil,
-            provenance:
-              "frozen contract external liability; runtime work/effect provenance NOT established"
-          }
-      }
-    end)
-  end
 
   def account(world, cutoff) do
     state = snapshot(world)
@@ -95,15 +84,7 @@ defmodule SpaceTraders.ShipyardProofWorld do
       |> Enum.sum_by(&max(-&1.signed_cash, 0))
     end
 
-    debit = state.pending_debit
-    last_at = if last, do: last.completed_at, else: @t0
     observed_credits = if last, do: last.after.credits, else: 400_000
-
-    observed_credits =
-      if debit && DateTime.compare(last_at, debit.due_at) == :lt &&
-           DateTime.compare(cutoff, debit.due_at) != :lt,
-         do: observed_credits - debit.actual,
-         else: observed_credits
 
     cutoff_state = Map.merge(state, if(last, do: last.after, else: state.initial))
     cutoff_state = advance(cutoff_state, cutoff)
@@ -116,9 +97,6 @@ defmodule SpaceTraders.ShipyardProofWorld do
       goods_outlays: outlays.("/purchase"),
       fuel_outlays: outlays.("/refuel"),
       acquisition_outlays: outlays.("/my/ships"),
-      debit_outlays: outlays.("/external-debit"),
-      uncertain_debit_bound:
-        if(debit && DateTime.compare(cutoff, debit.due_at) == :lt, do: debit.bound, else: 0),
       unknown_monetary_effects: [],
       unexplained_cash: observed_credits - 400_000 - cash,
       low_credits:
@@ -155,7 +133,7 @@ defmodule SpaceTraders.ShipyardProofWorld do
       movement = div(1600 - units, 4)
       buy = if type == "EXPORT", do: buy + movement, else: buy
       sell = if type == "IMPORT", do: sell - movement, else: sell
-      Map.put(good(trade, type, buy, sell), "tradeVolume", min(40, units))
+      Map.put(good(trade, type, buy, sell), "tradeVolume", min(state.transaction_maximum, units))
     end
 
     goods =
@@ -201,7 +179,8 @@ defmodule SpaceTraders.ShipyardProofWorld do
     }
   end
 
-  def reply(world, conn, controller) do
+  def reply(world, conn, controller, delivery \\ :delivered)
+      when delivery in [:delivered, :lost_response] do
     started_at = Clock.utc_now()
     SpaceTraders.ShipyardProofRuntime.wait(controller, :service, 1000)
 
@@ -213,6 +192,7 @@ defmodule SpaceTraders.ShipyardProofWorld do
           method: conn.method,
           path: conn.request_path,
           body: conn.body_params,
+          delivery: delivery,
           started_at: started_at,
           completed_at: Clock.utc_now(),
           before:
@@ -279,7 +259,11 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
     body = if conn.request_path == "/v2/", do: response, else: %{"data" => response}
     body = if meta, do: Map.put(body, "meta", meta), else: body
-    Req.Test.json(conn, body)
+
+    case delivery do
+      :delivered -> Req.Test.json(conn, body)
+      :lost_response -> Req.Test.transport_error(conn, :timeout)
+    end
   end
 
   defp respond(state, "GET", "/v2/", _) do
@@ -608,32 +592,8 @@ defmodule SpaceTraders.ShipyardProofWorld do
       end)
 
     %{state | routes: routes, replenished_at: DateTime.add(state.replenished_at, periods * 1800)}
-    |> settle_debit(now)
     |> arrive(now)
   end
-
-  defp settle_debit(%{pending_debit: %{settled_at: nil} = debit} = state, now) do
-    if DateTime.compare(now, debit.due_at) != :lt do
-      effect = %{
-        at: debit.due_at,
-        path: "/fixture/external-debit",
-        body: %{id: debit.id},
-        signed_cash: -debit.actual
-      }
-
-      %{
-        state
-        | credits: state.credits - debit.actual,
-          low_credits: min(state.low_credits, state.credits - debit.actual),
-          pending_debit: %{debit | settled_at: debit.due_at},
-          effects: state.effects ++ [effect]
-      }
-    else
-      state
-    end
-  end
-
-  defp settle_debit(state, _now), do: state
 
   def waypoint(symbol) do
     {x, y} = Map.fetch!(@coordinates, symbol)

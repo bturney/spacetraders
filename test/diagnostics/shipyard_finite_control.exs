@@ -7,6 +7,7 @@ defmodule SpaceTraders.ShipyardFiniteControl do
 
   def run do
     if Process.whereis(Repo), do: raise("run this diagnostic with mix run --no-start")
+    Logger.configure(level: Application.get_env(:logger, :level, :error))
     previous_repo = Application.fetch_env!(:spacetraders, Repo)
     leak_baseline = SpaceTraders.FixtureLeakProbe.baseline()
     # A committed diagnostic is not a long-lived Sandbox owner. The default
@@ -21,9 +22,11 @@ defmodule SpaceTraders.ShipyardFiniteControl do
       {:ok, _} = Application.ensure_all_started(:spacetraders)
       replay()
     after
-      :ok = Application.stop(:spacetraders)
+      # Restore only the Repo child: stopping the entire application can send
+      # :shutdown through links owned by the standalone Mix caller.
+      :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, Repo)
       Application.put_env(:spacetraders, Repo, previous_repo)
-      {:ok, _} = Application.ensure_all_started(:spacetraders)
+      {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, Repo)
       :ok = Ecto.Adapters.SQL.Sandbox.mode(Repo, :manual)
       SpaceTraders.FixtureLeakProbe.assert_clean!(leak_baseline, capacity: true)
     end
@@ -79,12 +82,16 @@ defmodule SpaceTraders.ShipyardFiniteControl do
           SpaceTraders.Quiesced.child_spec(SpaceTraders.Evidence.DemandScheduler)
         )
 
-      result = ShipyardProofRuntime.finite_control(world, fleet, preset)
+      # A named prefix is lifecycle bring-up only, never a completed T48h arm.
+      seconds = System.get_env("SHIPYARD_PROOF_PREFIX_SECONDS", "172800") |> String.to_integer()
+      assert seconds in 1..172_800
+      cutoff = DateTime.add(~U[2026-10-22 00:00:00Z], seconds)
+      result = ShipyardProofRuntime.finite_control(world, fleet, preset, cutoff)
       ShipyardProofRuntime.write_control_receipt(result, preset)
       assert result.account.unexplained_cash == 0
       assert result.account.credits == 400_000 + result.account.net_cash
-      assert result.account.debit_outlays == 20_000
-      assert result.as_of == ~U[2026-10-24 00:00:00Z]
+      assert result.manifest.external_liability == false
+      assert result.as_of == cutoff
       assert DateTime.compare(result.execution_stopped_at, result.as_of) != :lt
       refute Enum.any?(result.request_effects, &Map.has_key?(&1, :failure))
 

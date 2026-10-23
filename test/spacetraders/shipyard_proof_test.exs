@@ -239,7 +239,7 @@ defmodule SpaceTraders.ShipyardProofTest do
     end
   end
 
-  test "the finite control prefix retains actual work and settles its external debit once" do
+  test "the amended positive prefix retains actual work without an external liability" do
     # The exact 48h replay is opt-in: test/diagnostics/shipyard_finite_control.exs.
     preset = System.get_env("SHIPYARD_PROOF_PRESET", "steady_growth")
     world = start_supervised!({World, []})
@@ -260,8 +260,12 @@ defmodule SpaceTraders.ShipyardProofTest do
     assert result.account.goods_outlays > 0
     assert result.account.fuel_outlays > 0
     assert result.account.unexplained_cash == 0
-    assert result.account.debit_outlays == 20_000
-    assert result.account.uncertain_debit_bound == 0
+    refute Map.has_key?(World.snapshot(world), :pending_debit)
+    refute Enum.any?(result.account.effects, &(&1.path == "/fixture/external-debit"))
+    assert result.manifest.worst_preset_funding == 320_000
+    assert result.manifest.selected_work_initial_reservation == 50_000
+    assert result.manifest.acquisition_preparation_bound == 135_000
+    assert result.manifest.first_cycle_envelope == 60_000
     assert result.floor == if(preset == "steady_growth", do: 50_000, else: 75_000)
     assert result.account.low_credits >= result.floor
     assert length(result.decisions) > 0
@@ -307,6 +311,148 @@ defmodule SpaceTraders.ShipyardProofTest do
     assert [request] = World.snapshot(world).requests
     assert DateTime.diff(request.started_at, @t0, :millisecond) == 500
     assert request.completed_at == SpaceTraders.Clock.utc_now()
+  end
+
+  for preset <- ~w(steady_growth charted_expansion) do
+    @payment_preset preset
+    test "#{preset}: separate payment safety protects and settles its real 20-unit purchase once" do
+      world = start_supervised!({World, scenario: :payment_safety})
+      controller = self()
+
+      Req.Test.stub(SpaceTraders.API, fn conn ->
+        if String.ends_with?(conn.request_path, "/purchase"),
+          do: World.reply(world, conn, controller, :lost_response),
+          else: World.reply(world, conn, controller)
+      end)
+
+      Req.Test.allow(SpaceTraders.API, self(), fn ->
+        DynamicSupervisor.which_children(SpaceTraders.Fleet.ShipSupervisor)
+        |> Enum.map(fn {_, pid, _, _} -> pid end)
+      end)
+
+      fleet = Runtime.fresh_generation(world, @payment_preset)
+
+      assert {:ok, %{action: :published, commitments: commitments}} =
+               Runtime.run(fn -> Runtime.reconcile(fleet) end)
+
+      trade = Enum.find(commitments, &(&1.claims == ["PROOF824-1"]))
+      assert trade.reservations["credits"] == 25_000
+
+      [attempt] =
+        Enum.filter(
+          SpaceTraders.MutationAttempts.list_for_agent(fleet.agent),
+          &(&1.operation_id == "purchase-cargo")
+        )
+
+      assert attempt.state == "ambiguous"
+      assert attempt.prepared_evidence["spending"]["worst_case_exposure"] == 25_000
+      assert attempt.prepared_evidence["request"]["body"]["units"] == 20
+      assert attempt.provenance["commitment_id"] == trade.id
+      assert attempt.provenance["intent_id"]
+      assert %DateTime{} = attempt.sent_or_unknown_at
+
+      assert [%{id: id}] =
+               SpaceTraders.SafetyFence.blocking_attempts([
+                 SpaceTraders.SafetyFence.DependencyKey.agent_credits(fleet.agent.id)
+               ])
+
+      assert id == attempt.id
+      assert World.snapshot(world).credits == 380_000
+      assert World.account(world, SpaceTraders.Clock.utc_now()).goods_outlays == 20_000
+
+      unknown = %{
+        at: SpaceTraders.Clock.utc_now(),
+        attempt:
+          Map.take(
+            attempt,
+            ~w(id state prepared_evidence provenance prepared_at sent_or_unknown_at)a
+          ),
+        commitment: Map.take(trade, ~w(id claims reservations dependencies)a),
+        intent:
+          SpaceTraders.Fleet.Intents.current(fleet.agent)
+          |> Enum.find(&(&1.id == attempt.provenance["intent_id"]))
+          |> Map.take(
+            ~w(id status blocker in_flight_action mutation_attempt_id fleet_commitment_id next_attempt_at)a
+          )
+      }
+
+      effect_at =
+        World.snapshot(world).requests
+        |> Enum.find(&String.ends_with?(&1.path, "/purchase"))
+        |> Map.fetch!(:completed_at)
+
+      for symbol <- ~w(PROOF824-1 PROOF824-2), do: SpaceTraders.Quiesced.stop_ship(symbol)
+      Req.Test.stub(SpaceTraders.API, fn conn -> World.reply(world, conn, controller) end)
+
+      for symbol <- ~w(PROOF824-1 PROOF824-2),
+          do: SpaceTraders.Fleet.ShipServer.ensure_started(fleet.agent, symbol)
+
+      Runtime.run(fn -> SpaceTraders.Fleet.Intents.rearm_on_boot() end)
+
+      retry =
+        SpaceTraders.Timeline.pending_events(:ship, "PROOF824-1")
+        |> Enum.find(&(&1.event_type == "intent_retry"))
+
+      assert retry
+
+      Stream.repeatedly(fn ->
+        Runtime.next_event()
+        Runtime.settle_ships()
+      end)
+      |> Enum.find(fn _ -> not SpaceTraders.Timeline.pending?(retry) end)
+
+      Runtime.settle_ships()
+      settled = SpaceTraders.MutationAttempts.get!(attempt.id)
+
+      assert settled.state == "accepted",
+             inspect(
+               %{
+                 intents:
+                   Enum.map(
+                     SpaceTraders.Fleet.Intents.current(fleet.agent),
+                     &Map.take(&1, ~w(id status blocker next_attempt_at last_action_result)a)
+                   ),
+                 capacity: SpaceTraders.API.CapacityGovernor.diagnostics(),
+                 requests:
+                   World.snapshot(world).requests
+                   |> Enum.take(-6)
+                   |> Enum.map(&{&1.path, &1.completed_at})
+               },
+               limit: :infinity
+             )
+
+      assert Enum.map(settled.outcomes, & &1.classification) == ["ambiguous", "accepted"]
+      assert DateTime.compare(List.last(settled.outcomes).recorded_at, effect_at) == :gt
+      Runtime.run(fn -> SpaceTraders.Fleet.Intents.rearm_on_boot() end)
+      Runtime.settle_ships()
+
+      purchases =
+        Enum.filter(
+          SpaceTraders.MutationAttempts.list_for_agent(fleet.agent),
+          &(&1.operation_id == "purchase-cargo")
+        )
+
+      assert Enum.map(purchases, & &1.id) == [attempt.id]
+
+      assert SpaceTraders.SafetyFence.blocking_attempts([
+               SpaceTraders.SafetyFence.DependencyKey.agent_credits(fleet.agent.id)
+             ]) == []
+
+      account = World.account(world, SpaceTraders.Clock.utc_now())
+
+      assert {account.credits, account.goods_outlays, account.net_cash} ==
+               {380_000, 20_000, -20_000}
+
+      assert Enum.count(account.effects, &(&1.signed_cash != 0)) == 1
+
+      assert Enum.count(World.snapshot(world).requests, &String.ends_with?(&1.path, "/purchase")) ==
+               1
+
+      receipt = Runtime.write_payment_receipt(world, fleet, @payment_preset, unknown)
+      assert receipt.unknown.attempt.state == "ambiguous"
+      assert receipt.settled_attempt.state == "accepted"
+      assert receipt.account.net_cash == -20_000
+    end
   end
 
   test "unsupported API requests fail rather than inventing an effect" do
