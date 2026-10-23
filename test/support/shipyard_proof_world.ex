@@ -238,7 +238,7 @@ defmodule SpaceTraders.ShipyardProofWorld do
 
         try do
           {response, meta, next} =
-            respond(state, conn.method, conn.request_path, conn.body_params)
+            respond_before_reset(state, conn.method, conn.request_path, conn.body_params)
 
           receipt =
             Map.merge(receipt, %{
@@ -287,12 +287,35 @@ defmodule SpaceTraders.ShipyardProofWorld do
         {:error, error, stacktrace} -> reraise error, stacktrace
       end
 
-    body = if conn.request_path == "/v2/", do: response, else: %{"data" => response}
+    reset? = is_map(response) and Map.has_key?(response, "error")
+    body = if conn.request_path == "/v2/" or reset?, do: response, else: %{"data" => response}
     body = if meta, do: Map.put(body, "meta", meta), else: body
+    conn = if reset?, do: Plug.Conn.put_status(conn, 401), else: conn
 
     case delivery do
       :delivered -> Req.Test.json(conn, body)
       :lost_response -> Req.Test.transport_error(conn, :timeout)
+    end
+  end
+
+  # S4 only: the announced boundary invalidates the old credential. Returning
+  # the real API-shaped mismatch lets the existing lifecycle owner fence it;
+  # the fixture never edits Generation, Revision, Attempts or queued work.
+  defp respond_before_reset(state, method, path, body) do
+    if String.starts_with?(path, "/v2/my/") and
+         DateTime.compare(Clock.utc_now(), state.reset_at) != :lt do
+      expected = state.reset_at |> DateTime.to_date() |> Date.to_iso8601()
+      actual = @t0 |> DateTime.to_date() |> Date.add(-1) |> Date.to_iso8601()
+
+      {%{
+         "error" => %{
+           "code" => 4113,
+           "message" =>
+             "Failed to parse token. Token reset_date does not match the server. Server resets happen weekly. After a reset, you should re-register your agent. Expected: #{expected}, Actual: #{actual}"
+         }
+       }, nil, state}
+    else
+      respond(state, method, path, body)
     end
   end
 

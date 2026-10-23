@@ -102,6 +102,19 @@ defmodule SpaceTraders.ShipyardPaybackTest do
                :inconclusive
     end
 
+    test "a decisive missing receipt takes precedence over an incomplete cycle count" do
+      v = %{
+        @v
+        | new_ship_cycles: [20_000],
+          unknown_effects: [%{amount: nil, minimum: 0, maximum: nil}]
+      }
+
+      result = ShipyardPayback.classify(@b, v)
+      assert result.p1 == :inconclusive
+      assert result.productive_path == :inconclusive
+      assert result.payback == :inconclusive
+    end
+
     test "fewer than two profitable cycles or a nonpositive aggregate fails the productive path" do
       for cycles <- [[20_000], [20_000, -1], [30_000, -100]] do
         result = ShipyardPayback.classify(@b, %{@v | new_ship_cycles: cycles})

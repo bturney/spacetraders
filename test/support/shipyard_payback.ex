@@ -75,8 +75,10 @@ defmodule SpaceTraders.ShipyardPayback do
 
   @doc "Arm summaries carry net_cash, acquisitions, new_ship_cycles (net earnings), unknown_effects and V's payback."
   def classify(b, v) do
-    path = productive_path(v)
-    payback = get_in(v, [:payback, :classification])
+    path = if(v.unknown_effects == [], do: productive_path(v), else: :inconclusive)
+
+    payback =
+      if(v.unknown_effects == [], do: get_in(v, [:payback, :classification]), else: :inconclusive)
 
     p1 =
       cond do

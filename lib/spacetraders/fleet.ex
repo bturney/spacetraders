@@ -908,7 +908,8 @@ defmodule SpaceTraders.Fleet do
       "waypoint_symbol" => transaction.waypoint_symbol,
       "units" => transaction.units,
       "price_per_unit" => transaction.price_per_unit,
-      "total_price" => transaction.total_price
+      "total_price" => transaction.total_price,
+      "timestamp" => transaction.timestamp
     }
   end
 

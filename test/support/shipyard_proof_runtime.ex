@@ -460,6 +460,105 @@ defmodule SpaceTraders.ShipyardProofRuntime do
   def receipt_json(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> receipt_json()
   def receipt_json(value), do: value
 
+  @doc """
+  Read-only, goods-only S4 evidence tracer. Not a ledger or a recovery owner.
+  Never reads the World's hidden effects. Missing transaction amounts/times
+  remain bounded unknowns even when the mutation owner proved acceptance.
+  Acquisition/support cash, stock and open work stay in the separate World
+  oracle account. These bounded first-trade variants have no support charges.
+  """
+  def cash_evidence(fleet, cutoff) do
+    intents =
+      SpaceTraders.Fleet.Intents.current(fleet.agent) ++
+        SpaceTraders.Fleet.Intents.history(fleet.agent)
+
+    facts =
+      SpaceTraders.MutationAttempts.list_for_agent(fleet.agent)
+      |> Enum.filter(&(&1.operation_id in ~w(purchase-cargo sell-cargo)))
+      |> Enum.reject(&(&1.state in SpaceTraders.MutationAttempts.no_effect_states()))
+      |> Enum.map(&cash_fact(&1, intents))
+
+    {tail, facts} =
+      Enum.split_with(facts, fn fact ->
+        DateTime.compare(fact.effect_at || fact.earliest_at, cutoff) == :gt
+      end)
+
+    {known, unknown} =
+      Enum.split_with(facts, fn fact ->
+        is_integer(fact.amount) and
+          DateTime.compare(fact.effect_at || fact.proven_by, cutoff) != :gt
+      end)
+
+    cash = Enum.sum_by(known, & &1.amount)
+
+    bounds = %{
+      minimum: cash + Enum.sum_by(unknown, & &1.minimum),
+      maximum:
+        if(Enum.all?(unknown, &is_integer(&1.maximum)),
+          do: cash + Enum.sum_by(unknown, & &1.maximum)
+        )
+    }
+
+    %{
+      scope: :goods_only,
+      cutoff: cutoff,
+      net_cash: if(unknown == [], do: cash),
+      known_net_cash: cash,
+      net_cash_bounds: bounds,
+      unknown_monetary_effects: unknown,
+      receipts: known,
+      closure_tail: tail,
+      economic_claim: if(unknown == [], do: :not_assessed, else: :inconclusive)
+    }
+  end
+
+  defp cash_fact(attempt, intents) do
+    intent = Enum.find(intents, &(&1.id == attempt.provenance["intent_id"]))
+    transaction = intent && get_in(intent.last_action_result || %{}, ["transaction"])
+    amount = transaction && transaction["total_price"]
+    timestamp = transaction && transaction["timestamp"]
+    occurrence = if timestamp, do: DateTime.from_iso8601(timestamp)
+    bound = get_in(attempt.prepared_evidence, ["spending", "worst_case_exposure"])
+    debit? = attempt.operation_id == "purchase-cargo"
+    accepted = Enum.find(attempt.outcomes, &(&1.classification == "accepted"))
+
+    # The owner already validated this exact Attempt's exclusive credit proof.
+    # A later balance proves amount and an occurrence interval, not an instant.
+    credit_proof =
+      accepted &&
+        Enum.find(accepted.evidence["observations"] || [], fn observation ->
+          observation["operation_id"] == "get-my-agent" and
+            String.contains?(
+              get_in(observation, ["facts", "reconciliation", "basis"]) || "",
+              "attributable Agent credits"
+            )
+        end)
+
+    before_credits = get_in(attempt.prepared_evidence, ["selected_action", "credits_before"])
+    after_credits = credit_proof && get_in(credit_proof, ["facts", "response", "credits"])
+
+    recovered_amount =
+      if is_integer(before_credits) and is_integer(after_credits),
+        do: after_credits - before_credits
+
+    {amount, effect_at, proven_by} =
+      case {amount, occurrence} do
+        {n, {:ok, at, 0}} when is_integer(n) -> {if(debit?, do: -n, else: n), at, at}
+        _ -> {recovered_amount, nil, if(accepted, do: accepted.recorded_at)}
+      end
+
+    %{
+      attempt_id: attempt.id,
+      state: attempt.state,
+      amount: amount,
+      effect_at: effect_at,
+      earliest_at: attempt.sent_or_unknown_at,
+      proven_by: proven_by,
+      minimum: if(is_integer(amount), do: min(amount, 0), else: if(debit?, do: -bound, else: 0)),
+      maximum: if(is_integer(amount), do: max(amount, 0), else: if(debit?, do: 0))
+    }
+  end
+
   @doc "Clean only the committed diagnostic's installation, after owned runtime children stop."
   def cleanup_control_fixture(fleet) do
     symbols =
