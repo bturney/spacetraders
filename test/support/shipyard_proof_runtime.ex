@@ -152,7 +152,8 @@ defmodule SpaceTraders.ShipyardProofRuntime do
 
     prefix? =
       Keyword.get(opts, :stop_at_readiness, false) or
-        Keyword.get(opts, :stop_at_unsettled_purchase, false)
+        Keyword.get(opts, :stop_at_unsettled_purchase, false) or
+        Keyword.has_key?(opts, :stop_after_cycles)
 
     as_of = if prefix?, do: Clock.utc_now(), else: cutoff
     state = World.snapshot(world)
@@ -175,6 +176,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
       run_kind:
         cond do
           Keyword.get(opts, :stop_at_unsettled_purchase) -> "unsettled_purchase_prefix"
+          Keyword.has_key?(opts, :stop_after_cycles) -> "productive_cycles_prefix"
           Keyword.get(opts, :stop_at_readiness) -> "acquisition_readiness_prefix"
           cutoff == DateTime.add(@t0, 48, :hour) -> "matched_control_48h"
           true -> "prefix_only"
@@ -565,7 +567,17 @@ defmodule SpaceTraders.ShipyardProofRuntime do
           SpaceTraders.FleetAcquisition.open_purchase(fleet.agent)
         )
 
-    if ready? or unsettled? or DateTime.compare(Clock.utc_now(), cutoff) != :lt do
+    cycled? =
+      case Keyword.get(opts, :stop_after_cycles) do
+        {symbol, count} ->
+          SpaceTraders.Outcomes.Earnings.list(fleet.generation.id)
+          |> Enum.count(&(&1.ship_symbol == symbol)) >= count
+
+        nil ->
+          false
+      end
+
+    if ready? or unsettled? or cycled? or DateTime.compare(Clock.utc_now(), cutoff) != :lt do
       Enum.reverse(progress)
     else
       receive do
