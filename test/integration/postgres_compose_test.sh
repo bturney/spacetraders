@@ -15,6 +15,12 @@ jq -e '
   .services.postgres.volumes[0].source == "spacetraders-postgres"
 ' <<<"$config" >/dev/null
 
+# A host reboot must bring both long-running services back.
+jq -e '
+  .services.postgres.restart == "unless-stopped" and
+  .services.web.restart == "unless-stopped"
+' <<<"$config" >/dev/null
+
 images=$(SECRET_KEY_BASE=test ENCRYPTION_KEY=test PHX_HOST=example.test POSTGRES_PASSWORD=test \
   SPACETRADERS_IMAGE=example.test/spacetraders:sha-test \
   docker compose -f compose.yaml -f compose.production.yaml config --images | sort -u)
