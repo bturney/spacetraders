@@ -153,7 +153,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
     prefix? =
       Keyword.get(opts, :stop_at_readiness, false) or
         Keyword.get(opts, :stop_at_unsettled_purchase, false) or
-        Keyword.has_key?(opts, :stop_after_cycles)
+        Keyword.has_key?(opts, :stop_after_cycles) or Keyword.has_key?(opts, :stop_when)
 
     as_of = if prefix?, do: Clock.utc_now(), else: cutoff
     state = World.snapshot(world)
@@ -178,6 +178,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
           Keyword.get(opts, :stop_at_unsettled_purchase) -> "unsettled_purchase_prefix"
           Keyword.has_key?(opts, :stop_after_cycles) -> "productive_cycles_prefix"
           Keyword.get(opts, :stop_at_readiness) -> "acquisition_readiness_prefix"
+          Keyword.has_key?(opts, :stop_when) -> "named_condition_prefix"
           cutoff == DateTime.add(@t0, 48, :hour) -> "matched_control_48h"
           true -> "prefix_only"
         end,
@@ -577,7 +578,16 @@ defmodule SpaceTraders.ShipyardProofRuntime do
           false
       end
 
-    if ready? or unsettled? or cycled? or DateTime.compare(Clock.utc_now(), cutoff) != :lt do
+    # A caller-named observable stop (e.g. #841's fenced-dependency proof),
+    # evaluated only between scheduled events like the prefixes above.
+    named? =
+      case Keyword.get(opts, :stop_when) do
+        stop when is_function(stop, 0) -> stop.()
+        nil -> false
+      end
+
+    if ready? or unsettled? or cycled? or named? or
+         DateTime.compare(Clock.utc_now(), cutoff) != :lt do
       Enum.reverse(progress)
     else
       receive do

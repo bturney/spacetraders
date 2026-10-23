@@ -197,6 +197,86 @@ defmodule SpaceTraders.FleetIntentsTest do
     assert Intents.current(agent) == []
   end
 
+  test "a Commitment purchase whose newer destination evidence removed the spread ends infeasible" do
+    {agent, ship, portfolio, commitment} = claimed_ship("INTENTS-SPREAD")
+    ship_path = "/v2/my/ships/#{ship.symbol}"
+    market_path = "/v2/systems/X1-UX81/waypoints/X1-UX81-A1/market"
+    destination = "X1-UX81-A2"
+
+    Req.Test.stub(SpaceTraders.API, fn conn ->
+      case {conn.method, conn.request_path} do
+        {"GET", ^ship_path} ->
+          Req.Test.json(conn, %{
+            "data" =>
+              ship_body(ship.symbol, %{
+                "nav" => nav_body("DOCKED"),
+                "cargo" => %{"capacity" => 40, "units" => 0, "inventory" => []}
+              })
+          })
+
+        {"GET", "/v2/my/agent"} ->
+          Req.Test.json(conn, %{"data" => %{"symbol" => agent.symbol, "credits" => 100}})
+
+        {"GET", ^market_path} ->
+          Req.Test.json(conn, %{
+            "data" => %{
+              "symbol" => "X1-UX81-A1",
+              "tradeGoods" => [
+                %{
+                  "symbol" => "IRON_ORE",
+                  "purchasePrice" => 10,
+                  "sellPrice" => 8,
+                  "tradeVolume" => 5
+                }
+              ]
+            }
+          })
+
+        request ->
+          flunk("unexpected request: #{inspect(request)}")
+      end
+    end)
+
+    # Planned on one destination quote; a later on-site read sells at 10,
+    # no more than the live purchase price.
+    planned = "evidence-observation:#{Ecto.UUID.generate()}"
+    newer = record_destination_market(agent, portfolio, destination, 10)
+
+    candidate = %{
+      market_candidate(portfolio)
+      | destination_waypoint: destination,
+        dependencies: [
+          %{subject: "market:X1-UX81:#{destination}", evidence_id: planned, source: "get-market"}
+        ],
+        validity: %{
+          as_of: ~U[2030-01-01 12:00:00Z],
+          conditions: [%{fact: :source_purchase_price, operator: :equals, value: 10}]
+        }
+    }
+
+    assert {:ok, %Intent{type: "buy", status: "infeasible", mutation_attempt_id: nil} = refused} =
+             Intents.request_commitment_round_trip(
+               agent,
+               commitment,
+               portfolio,
+               ship.symbol,
+               candidate
+             )
+
+    assert %{
+             "outcome" => "infeasible",
+             "evidence" => %{
+               "reason" => "destination_spread_lost",
+               "destination_sell_price" => 10,
+               "purchase_price" => 10
+             }
+           } = refused.last_action_result
+
+    assert newer.subject == "market:X1-UX81:#{destination}"
+    assert SpaceTraders.MutationAttempts.list_for_agent(agent) == []
+    assert Intents.current(agent) == []
+  end
+
   test "a sibling credit fence reaches the Market Intent's blocker without preparing a send" do
     {agent, ship, portfolio, commitment} = claimed_ship("INTENTS-FENCED")
 
@@ -293,6 +373,56 @@ defmodule SpaceTraders.FleetIntentsTest do
       validity: %{as_of: ~U[2030-01-01 12:00:00Z], conditions: []},
       alternatives: []
     }
+  end
+
+  defp record_destination_market(agent, portfolio, waypoint, sell_price) do
+    subject = "market:X1-UX81:#{waypoint}"
+    observed_at = DateTime.add(DateTime.utc_now(), -1)
+
+    market =
+      SpaceTraders.API.Model.Market.from_json(%{
+        "symbol" => waypoint,
+        "imports" => [],
+        "exports" => [],
+        "exchange" => [],
+        "tradeGoods" => [
+          %{
+            "symbol" => "IRON_ORE",
+            "type" => "IMPORT",
+            "supply" => "ABUNDANT",
+            "purchasePrice" => sell_price + 5,
+            "sellPrice" => sell_price,
+            "tradeVolume" => 5
+          }
+        ]
+      })
+
+    facts = %{
+      "symbol" => waypoint,
+      "trade_goods" => Enum.map(market.trade_goods, &Map.from_struct/1)
+    }
+
+    evidence =
+      Repo.insert!(%SpaceTraders.Evidence.Observation{
+        agent_id: agent.id,
+        fleet_generation_id: portfolio.fleet_generation_id,
+        subject: subject,
+        operation_id: "get-market",
+        dependency_keys: [subject],
+        facts: facts,
+        response_fingerprint: SpaceTraders.Evidence.fingerprint(facts),
+        observed_at: observed_at
+      })
+
+    {:ok, _} =
+      SpaceTraders.Intelligence.observe_market(agent, "X1-UX81", market,
+        source: "get_market",
+        observing_ship_symbol: "INTENTS-SPREAD-OBSERVER",
+        observed_at: observed_at,
+        evidence: evidence
+      )
+
+    evidence
   end
 
   defp trade_response(agent, ship, kind, price, credits, cargo_units) do
