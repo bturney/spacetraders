@@ -27,18 +27,6 @@ mix test test/diagnostics/runtime_qualification.exs --seed 0 --trace
 Runtime qualification drives authenticated Strategy activation through production
 planning and execution; keep deterministic regressions at their public seams.
 
-The #821 S3 whole-runtime deterioration matrix is a standalone diagnostic, not
-an ordinary discovered test. Run each combination of `steady_growth` /
-`charted_expansion` and `before_buy` / `after_buy` separately; assertions and
-owned-resource leak checks still fail the command. No ExUnit timeout override:
-
-```sh
-MIX_ENV=test SHIPYARD_PROOF_PRESET=steady_growth SHIPYARD_PROOF_ARM=before_buy SHIPYARD_PROOF_RECEIPTS=/tmp/opencode/841-receipts mix run --no-start test/diagnostics/shipyard_thesis_deterioration.exs
-```
-
-The ordinary `fleet_intents_test.exs` destination-spread regression covers the
-irreversible-buy guard; it does not substitute for the four runtime receipts.
-
 #838's ordinary `shipyard_refusal_test.exs` R1 tracer proves safety, not a
 valuation pass when no eligible current loser survives. To demand the exact R1
 acceptance evidence (and fail explicitly if inconclusive), run:
