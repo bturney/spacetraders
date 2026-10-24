@@ -238,15 +238,9 @@ defmodule SpaceTraders.FleetIntelligence do
         acquisition_work: FleetAllocation.ship_bound_unmet_work(agent, now)
       })
 
-    with :ok <- sync_market_demands(agent, revision, market),
-         :ok <-
-           sync_acquisition_observation_demands(
-             agent,
-             revision,
-             system,
-             market.acquisition_work,
-             now
-           ) do
+    # Ship Offer demands have one writer, Fleet Allocation's Acquisition
+    # reconcile, which runs on every Market boundary.
+    with :ok <- sync_market_demands(agent, revision, market) do
       {:ok,
        %{
          as_of: now,
