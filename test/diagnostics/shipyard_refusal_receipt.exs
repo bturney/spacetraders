@@ -1,7 +1,7 @@
 # Opt-in #838 R2 (200,000 initial credits) receipt, run unchanged in B and V. Shares #834's lifecycle and
 # finite World, entering the normal application's public reconciliation
 # boundary in BOTH arms. Writes the full receipt plus a ShipyardPayback arm
-# summary; compare B/V summaries with shipyard_productive_compare.exs.
+# summary; compare B/V summaries with shipyard_productive_compare.exs (retired; at 881523b).
 # The unchanged B clock contradiction is retained, never repaired here.
 #
 #   SHIPYARD_PROOF_PRESET=steady_growth SHIPYARD_PROOF_RECEIPTS=dir \
