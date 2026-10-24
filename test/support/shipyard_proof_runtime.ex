@@ -350,7 +350,7 @@ defmodule SpaceTraders.ShipyardProofRuntime do
 
   defp fixture_sources do
     Map.new(
-      ~w(test/support/shipyard_proof_world.ex test/support/shipyard_proof_runtime.ex test/support/test_clock.ex test/diagnostics/shipyard_finite_control.exs),
+      ~w(test/support/shipyard_proof_world.ex test/support/shipyard_proof_runtime.ex test/support/test_clock.ex),
       fn path ->
         {path, :crypto.hash(:sha256, File.read!(path)) |> Base.encode16(case: :lower)}
       end

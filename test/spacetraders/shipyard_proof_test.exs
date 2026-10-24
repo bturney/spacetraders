@@ -240,7 +240,7 @@ defmodule SpaceTraders.ShipyardProofTest do
   end
 
   test "the amended positive prefix retains actual work without an external liability" do
-    # The exact 48h replay is opt-in: test/diagnostics/shipyard_finite_control.exs.
+    # The 48h #834 control replay was retired; its receipts are in docs/autonomy/shipyard-evidence-821.md.
     preset = System.get_env("SHIPYARD_PROOF_PRESET", "steady_growth")
     world = start_supervised!({World, []})
     controller = self()

@@ -122,7 +122,7 @@ Prior scoped evidence: #841 final ordinary28/0 (105.9s), merger after#84128/0; #
 
 2. **Recompute summary classification / focused regressions**, in this repo with dependencies available; no live API or full replay:
 
-   The #837 48h diagnostics (`shipyard_productive_investment.exs`, `shipyard_productive_compare.exs`) were retired after this evidence was recorded; run the `mix run` lines and step 3 from a checkout of `881523b` or the listed pins. The gate keeps one `steady_growth` productive tracer.
+   The #837 48h diagnostics (`shipyard_productive_investment.exs`, `shipyard_productive_compare.exs`) and the #834 48h control (`shipyard_finite_control.exs`) were retired after this evidence was recorded; run the `mix run` lines and step 3 from a checkout of `881523b` or the listed pins. The gate keeps one `steady_growth` productive tracer.
 
    ```sh
    mix test test/spacetraders/shipyard_payback_test.exs --seed 0 --max-failures 1
