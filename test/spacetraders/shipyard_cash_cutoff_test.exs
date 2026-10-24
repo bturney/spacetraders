@@ -46,10 +46,7 @@ defmodule SpaceTraders.ShipyardCashCutoffTest do
         :error -> Application.delete_env(:spacetraders, :clock)
       end
 
-      :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
-
-      {:ok, _} =
-        Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+      SpaceTraders.Test.Governor.restart()
 
       :ok = Sandbox.mode(Repo, :manual)
       # Restore precisely the pre-test volatile credential fences. Do not clear

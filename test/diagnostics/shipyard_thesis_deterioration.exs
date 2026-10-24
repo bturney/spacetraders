@@ -99,10 +99,7 @@ defmodule SpaceTraders.ShipyardThesisDeterioration do
         :error -> Application.delete_env(:spacetraders, :clock)
       end
 
-      :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
-
-      {:ok, _} =
-        Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+      SpaceTraders.Test.Governor.restart()
 
       if fleet = Process.delete(:s3_fleet), do: Runtime.cleanup_control_fixture(fleet)
     end

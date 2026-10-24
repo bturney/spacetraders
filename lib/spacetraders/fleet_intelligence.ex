@@ -5,6 +5,7 @@ defmodule SpaceTraders.FleetIntelligence do
   alias SpaceTraders.{Clock, Evidence}
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Fleet
+  alias SpaceTraders.FleetAcquisition
   alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetShadow
@@ -174,7 +175,7 @@ defmodule SpaceTraders.FleetIntelligence do
     waypoints = World.projections(agent, system, now, @waypoint_freshness_seconds).waypoints
 
     specs =
-      if work == [] or SpaceTraders.FleetAcquisition.open_purchase(agent) do
+      if work == [] or FleetAcquisition.open_purchase(agent) do
         []
       else
         for waypoint <- waypoints,

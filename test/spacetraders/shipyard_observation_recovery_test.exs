@@ -283,9 +283,7 @@ defmodule SpaceTraders.ShipyardObservationRecoveryTest do
   end
 
   defp restart_governor do
-    governor = SpaceTraders.API.CapacityGovernor
-    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, governor)
-    {:ok, _} = Supervisor.restart_child(SpaceTraders.Supervisor, governor)
+    SpaceTraders.Test.Governor.restart()
   end
 
   defp yard_demands(fleet),

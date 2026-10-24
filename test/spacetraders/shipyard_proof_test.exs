@@ -707,10 +707,7 @@ defmodule SpaceTraders.ShipyardProofTest do
   end
 
   defp restart_governor do
-    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
-
-    {:ok, _} =
-      Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+    SpaceTraders.Test.Governor.restart()
   end
 
   defp restore(key, {:ok, value}), do: Application.put_env(:spacetraders, key, value)

@@ -602,15 +602,15 @@ defmodule SpaceTraders.CreditSpending do
   # A delivered mutation response carries its own authoritative post-effect
   # balance. Its exact confirmed charge is already included even if clock times
   # tie; no other settled or unresolved exposure can borrow this provenance.
-  defp balance_includes_effect?(%Attempt{state: "succeeded"} = attempt, source) do
-    source.agent_id == attempt.agent_id and
-      source.fleet_generation_id == attempt.fleet_generation_id and
-      source.operation_id == "get-my-agent" and
-      get_in(source.facts, ["mutation_response", "mutation_attempt_id"]) == attempt.id and
-      get_in(source.facts, ["mutation_response", "operation_id"]) == attempt.operation_id
+  defp balance_includes_effect?(%Attempt{state: "succeeded"} = attempt, balance_source) do
+    balance_source.agent_id == attempt.agent_id and
+      balance_source.fleet_generation_id == attempt.fleet_generation_id and
+      balance_source.operation_id == "get-my-agent" and
+      get_in(balance_source.facts, ["mutation_response", "mutation_attempt_id"]) == attempt.id and
+      get_in(balance_source.facts, ["mutation_response", "operation_id"]) == attempt.operation_id
   end
 
-  defp balance_includes_effect?(_attempt, _source), do: false
+  defp balance_includes_effect?(_attempt, _balance_source), do: false
 
   defp system_of(waypoint), do: waypoint |> String.split("-") |> Enum.take(2) |> Enum.join("-")
 end

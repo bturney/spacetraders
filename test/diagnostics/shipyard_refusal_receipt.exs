@@ -192,10 +192,7 @@ defmodule SpaceTraders.ShipyardRefusalReceipt do
         :error -> Application.delete_env(:spacetraders, :clock)
       end
 
-      :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
-
-      {:ok, _} =
-        Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+      SpaceTraders.Test.Governor.restart()
 
       if fleet = Process.delete(:proof_fleet),
         do: ShipyardProofRuntime.cleanup_control_fixture(fleet)

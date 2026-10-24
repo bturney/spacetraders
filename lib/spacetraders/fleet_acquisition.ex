@@ -14,21 +14,25 @@ defmodule SpaceTraders.FleetAcquisition do
   alias SpaceTraders.Agent, as: AgentContext
   alias SpaceTraders.Agent.{Agent, Scope}
   alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.Clock
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.Commitment
+  alias SpaceTraders.FleetAllocation.{Commitment, JsonEvidence, MarketDomain}
+  alias SpaceTraders.FleetPlanning.ShipInvestment
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.CreditSpending
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
+  alias SpaceTraders.Observability
+  alias SpaceTraders.OperatorAuthority
   alias SpaceTraders.Repo
 
   @doc "Resumes the open acquisition's purchase and registers the Ship from authoritative readiness."
   def reconcile(%Scope{} = scope, %Agent{} = agent) do
-    with {:ok, _} <- SpaceTraders.OperatorAuthority.authorize(scope),
+    with {:ok, _} <- OperatorAuthority.authorize(scope),
          %Generation{} <- FleetAllocation.active_generation(agent) do
       case open_purchase(agent) do
         {commitment, attempt} ->
@@ -179,9 +183,9 @@ defmodule SpaceTraders.FleetAcquisition do
         agent = Repo.get!(Agent, attempt.agent_id)
 
         with {:ok, expiry, _} <- DateTime.from_iso8601(expires),
-             :gt <- DateTime.compare(expiry, SpaceTraders.Clock.utc_now()),
+             :gt <- DateTime.compare(expiry, Clock.utc_now()),
              :ok <-
-               SpaceTraders.FleetAllocation.MarketDomain.revalidate_trade_evidence(agent, [
+               MarketDomain.revalidate_trade_evidence(agent, [
                  %{dependencies: dependencies}
                ]) do
           :ok
@@ -470,8 +474,8 @@ defmodule SpaceTraders.FleetAcquisition do
   defp transaction_map(transaction), do: Map.from_struct(transaction)
 
   defp readiness_matches?(ready, requirements) when is_map(ready) and is_map(requirements) do
-    requirements = SpaceTraders.FleetAllocation.JsonEvidence.dump(requirements)
-    configuration = SpaceTraders.FleetPlanning.ShipInvestment.configuration(ready)
+    requirements = JsonEvidence.dump(requirements)
+    configuration = ShipInvestment.configuration(ready)
     profile = work_profile(ready)
 
     with %{} = promised <- requirements["configuration"],
@@ -520,7 +524,7 @@ defmodule SpaceTraders.FleetAcquisition do
   defp matches_fields?(actual, expected), do: actual == expected
 
   defp observe(portfolio, commitment, agent, callback) do
-    SpaceTraders.Observability.with_context(
+    Observability.with_context(
       [
         operator_id: agent.operator_id,
         agent_id: agent.id,

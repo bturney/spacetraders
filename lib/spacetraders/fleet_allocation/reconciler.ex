@@ -9,7 +9,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
   alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.MarketDomain
+  alias SpaceTraders.FleetAllocation.{Acquisition, MarketDomain}
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet
@@ -268,7 +268,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
   defp market_and_acquisition(scope, agent, revision, system, capacity) do
     acquisition = fn ->
-      SpaceTraders.FleetAllocation.Acquisition.reconcile(scope, agent, revision, system, capacity)
+      Acquisition.reconcile(scope, agent, revision, system, capacity)
     end
 
     result =
