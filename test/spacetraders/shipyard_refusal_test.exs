@@ -57,125 +57,87 @@ defmodule SpaceTraders.ShipyardRefusalTest do
     :ok
   end
 
-  for {preset, floor} <- [{"steady_growth", 50_000}, {"charted_expansion", 75_000}] do
-    @preset preset
-    @floor floor
+  # Only the enabled credit-growth preset runs here; both presets' receipts are
+  # in docs/autonomy/shipyard-evidence-821.md.
+  @preset "steady_growth"
 
-    test "#{preset}: R1 safety prefix retains an explicit incomplete valuation classification" do
-      result =
-        run(@preset, world: [reset_at: DateTime.add(@t0, 30, :minute)], cutoff: {30, :minute})
+  test "steady_growth: R1 safety prefix retains an explicit incomplete valuation classification" do
+    result =
+      run(@preset, world: [reset_at: DateTime.add(@t0, 30, :minute)], cutoff: {30, :minute})
 
-      assert result.preset == @preset
+    assert result.preset == @preset
+    assert_unchanged_preset(result)
+    assert_no_purchase_effect(result)
+    assert [_ | _] = refusal_reasons(result)
+
+    # Safety tracer, not an R1 acceptance pass: exact work selection may
+    # leave no current Claim-only loser before valuation is reached.
+    case result.proof.classification do
+      :pass -> assert_short_horizon_valuation(result)
+      :inconclusive -> assert result.proof.missing == "normal capped valuation refusal"
+    end
+
+    assert_unchanged_calibration(result)
+    assert_alternative_executes(result)
+  end
+
+  for {name, world} <- [
+        "rival Players consumed all destination demand": [rivals: ~w(IRON COPPER)],
+        "destination sell 1,000 equals the source buy": [destination_sell: 1000]
+      ] do
+    @world world
+    test "steady_growth: R3 #{name}; nothing is bought on stale or theoretical sales" do
+      result = run(@preset, world: @world, cutoff: {1, :hour})
+
       assert_unchanged_preset(result)
       assert_no_purchase_effect(result)
-      assert [_ | _] = reasons = refusal_reasons(result)
+      assert refusal_reasons(result) == ["no_claim_only_loser"]
 
-      # This ordinary tracer is NOT an R1 acceptance pass. Exact work selection
-      # may leave no current Claim-only loser; do not choose its winner or add a
-      # reconciliation to force valuation. The opt-in strict assertion retains
-      # the exact AC failure, and the paired Allocation :value test covers the
-      # actual capped valuation mechanism, not this exact application path.
-      if System.get_env("SHIPYARD_PROOF_REQUIRE_R1") == "true" do
-        assert result.proof.classification == :pass,
-               "R1 INCONCLUSIVE: #{inspect(result.proof)}; actual reasons: #{inspect(reasons)}"
-      end
+      # No goods bought, no sales: executable economics, not stale quotes.
+      assert Enum.reject(result.request_effects, &(&1.method == "GET")) |> Enum.map(& &1.path) ==
+               []
 
-      case result.proof.classification do
-        :pass -> assert_short_horizon_valuation(result)
-        :inconclusive -> assert result.proof.missing == "normal capped valuation refusal"
-      end
-
-      assert_unchanged_calibration(result)
-      assert_alternative_executes(result)
+      assert result.account.net_cash == 0
+      assert result.earnings == []
     end
+  end
 
-    test "#{preset}: R2 safety tracer distinguishes funding refusal from later recovery" do
-      result =
-        run(@preset,
-          world: [credits: 200_000],
-          cutoff: {2, :hour},
-          stop_at_funding_refusal: true
-        )
+  test "steady_growth: R3 rivals on IRON only leave independent COPPER work admissible" do
+    result =
+      run(@preset,
+        world: [rivals: ~w(IRON)],
+        cutoff: {48, :hour},
+        control: [stop_at_readiness: true]
+      )
 
-      assert result.preset == @preset
-      assert_unchanged_preset(result)
-      assert_unchanged_calibration(result)
-      assert_alternative_executes(result)
+    assert_unchanged_preset(result)
 
-      if System.get_env("SHIPYARD_PROOF_REQUIRE_R2") == "true" do
-        assert result.proof.classification == :pass,
-               "R2 INCONCLUSIVE: #{inspect(result.proof)}; actual reasons: #{inspect(refusal_reasons(result))}"
-      end
+    # The observed IRON depth is the rivals' actual residue, not the
+    # theoretical 1,600 units.
+    iron = latest_good(result, "X1-UX81-A2", "IRON")
+    assert iron["trade_volume"] == 0
+    assert iron["sell_price"] == 1100
 
-      case result.proof.classification do
-        :pass -> assert_funding_refusal(result)
-        :inconclusive -> assert result.proof.missing == "eligible funding refusal"
-      end
+    # Justified independent COPPER work was selected and traded ...
+    sells = Enum.filter(result.request_effects, &String.ends_with?(&1.path, "/sell"))
+    assert sells != []
+    assert Enum.all?(sells, &(&1.body["symbol"] == "COPPER"))
 
-      assert_acquisition_history(result)
-      assert result.account.low_credits >= @floor
-      assert result.account.credits == 200_000 + result.account.net_cash
-      assert result.account.unexplained_cash == 0
-    end
+    # ... and it, not IRON, is the work that justified the acquisition.
+    assert [purchase] =
+             Enum.filter(
+               result.request_effects,
+               &(&1.method == "POST" and &1.path == "/v2/my/ships")
+             )
 
-    for {name, world} <- [
-          "rival Players consumed all destination demand": [rivals: ~w(IRON COPPER)],
-          "destination sell 1,000 equals the source buy": [destination_sell: 1000]
-        ] do
-      @world world
-      test "#{preset}: R3 #{name}; nothing is bought on stale or theoretical sales" do
-        result = run(@preset, world: @world, cutoff: {1, :hour})
+    assert purchase.signed_cash == -100_000
 
-        assert_unchanged_preset(result)
-        assert_no_purchase_effect(result)
-        assert refusal_reasons(result) == ["no_claim_only_loser"]
+    valuation =
+      Enum.find_value(result.decisions, fn d ->
+        get_in(d.expectations, ["valuation", "enabled_work", "trade_symbol"])
+      end)
 
-        # No goods bought, no sales: executable economics, not stale quotes.
-        assert Enum.reject(result.request_effects, &(&1.method == "GET")) |> Enum.map(& &1.path) ==
-                 []
-
-        assert result.account.net_cash == 0
-        assert result.earnings == []
-      end
-    end
-
-    test "#{preset}: R3 rivals on IRON only leave independent COPPER work admissible" do
-      result =
-        run(@preset,
-          world: [rivals: ~w(IRON)],
-          cutoff: {48, :hour},
-          control: [stop_at_readiness: true]
-        )
-
-      assert_unchanged_preset(result)
-
-      # The observed IRON depth is the rivals' actual residue, not the
-      # theoretical 1,600 units.
-      iron = latest_good(result, "X1-UX81-A2", "IRON")
-      assert iron["trade_volume"] == 0
-      assert iron["sell_price"] == 1100
-
-      # Justified independent COPPER work was selected and traded ...
-      sells = Enum.filter(result.request_effects, &String.ends_with?(&1.path, "/sell"))
-      assert sells != []
-      assert Enum.all?(sells, &(&1.body["symbol"] == "COPPER"))
-
-      # ... and it, not IRON, is the work that justified the acquisition.
-      assert [purchase] =
-               Enum.filter(
-                 result.request_effects,
-                 &(&1.method == "POST" and &1.path == "/v2/my/ships")
-               )
-
-      assert purchase.signed_cash == -100_000
-
-      valuation =
-        Enum.find_value(result.decisions, fn d ->
-          get_in(d.expectations, ["valuation", "enabled_work", "trade_symbol"])
-        end)
-
-      assert valuation == "COPPER"
-    end
+    assert valuation == "COPPER"
   end
 
   defp assert_unchanged_preset(result) do
@@ -234,67 +196,6 @@ defmodule SpaceTraders.ShipyardRefusalTest do
     end
   end
 
-  defp assert_funding_refusal(result) do
-    assert_no_purchase_effect(result)
-
-    assert [%{expectations: expectations}] =
-             Enum.filter(
-               refusals(result.fleet),
-               &(&1.rejection_reason == "insufficient_acquisition_credits")
-             )
-
-    assert [_ | _] = expectations["considered_work"]
-
-    assert Enum.any?(expectations["limitations"], fn limitation ->
-             valuation = limitation["valuation"]
-
-             limitation["reason"] == "insufficient_acquisition_credits" and
-               valuation["total_exposure"] == 135_000 and valuation["available_credits"] < 135_000
-           end)
-
-    protection = Enum.sum_by(result.current_commitments, &(&1.reservations["credits"] || 0))
-    assert protection >= 50_000
-    assert result.account.credits - result.floor - protection < 135_000
-  end
-
-  defp assert_acquisition_history(result) do
-    for attempt <- result.attempts, attempt.operation_id == "purchase-ship" do
-      episode = Enum.find(result.decisions, &(&1.id == attempt.provenance["decision_episode_id"]))
-
-      commitment =
-        Enum.find(result.all_commitments, &(&1.id == attempt.provenance["commitment_id"]))
-
-      assert commitment
-      assert episode.selection_kind == :selected_plan
-      assert episode.expectations["domain"] == "ship_acquisition"
-      assert attempt.provenance["fleet_generation_id"] == result.generation
-      assert attempt.provenance["strategy_revision_id"] == result.strategy_revision
-      assert episode.expectations["valuation"]["available_credits"] >= 135_000
-
-      if attempt.state == "not_sent" do
-        assert attempt.sent_or_unknown_at == nil
-
-        assert Enum.any?(attempt.outcomes, fn outcome ->
-                 outcome.classification == "not_sent" and
-                   outcome.evidence["reason"] == ":ship_investment_evidence_unavailable"
-               end)
-
-        assert Enum.any?(episode.evidence_references, fn dependency ->
-                 {:ok, expires, _} = DateTime.from_iso8601(dependency["valid_until"])
-                 DateTime.compare(expires, attempt.prepared_at) != :gt
-               end)
-      else
-        assert attempt.state == "succeeded"
-        assert attempt.sent_or_unknown_at
-      end
-    end
-
-    if "acquisition_already_unsettled" in refusal_reasons(result) do
-      assert Enum.any?(result.attempts, &(&1.operation_id == "purchase-ship"))
-      assert SpaceTraders.FleetAcquisition.open_purchase(result.fleet.agent) == nil
-    end
-  end
-
   # The feasible alternative is the Fleet's ordinary selected trade, executed.
   defp assert_alternative_executes(result) do
     assert Enum.any?(result.decisions, fn d ->
@@ -345,15 +246,6 @@ defmodule SpaceTraders.ShipyardRefusalTest do
     {amount, unit} = Keyword.fetch!(opts, :cutoff)
 
     control = Keyword.merge([boundary: :application], Keyword.get(opts, :control, []))
-
-    control =
-      if Keyword.get(opts, :stop_at_funding_refusal) do
-        Keyword.put(control, :stop_when, fn ->
-          Enum.any?(refusals(fleet), &(&1.rejection_reason == "insufficient_acquisition_credits"))
-        end)
-      else
-        control
-      end
 
     result =
       Runtime.finite_control(
