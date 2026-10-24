@@ -1499,7 +1499,8 @@ defmodule SpaceTraders.Fleet.Intents do
             :shipyard ->
               Evidence.get_shipyard(reference, system, intent.target_waypoint,
                 owner: "ship_execution",
-                required_facts: intent.parameters["required_facts"]
+                required_facts: intent.parameters["required_facts"],
+                bind: true
               )
           end
 
@@ -2362,6 +2363,9 @@ defmodule SpaceTraders.Fleet.Intents do
       is_integer(max_price) and price > max_price ->
         {:error, {:price_constraint, price, max_price}}
 
+      lost = destination_spread_lost(agent, parameters, price) ->
+        {:error, lost}
+
       true ->
         with {:ok, overview} <- Agent.agent_overview(agent) do
           available_credits = max(overview.credits - (parameters["reserve_credits"] || 0), 0)
@@ -2442,6 +2446,43 @@ defmodule SpaceTraders.Fleet.Intents do
       do: {:ok, units, nil},
       else: {:error, if(remaining <= 0, do: :recipient_rejected_delivery, else: :cargo_missing)}
   end
+
+  # A planned Market trade's validity includes a positive spread against the
+  # destination quote it was planned on. Newer evidence at that destination
+  # that removes the spread refuses the irreversible buy, exactly as a source
+  # quote above the planned maximum does; Fleet Allocation replans from it.
+  # Contract and construction deliveries are paid by their recipient instead.
+  defp destination_spread_lost(
+         agent,
+         %{
+           "trade_symbol" => symbol,
+           "market_trade" => %{
+             "kind" => "market_trade",
+             "destination_waypoint" => destination,
+             "dependencies" => dependencies
+           }
+         },
+         price
+       )
+       when is_binary(destination) and is_list(dependencies) do
+    with {:ok, system} <- waypoint_system(destination),
+         subject = "market:#{system}:#{destination}",
+         %{"evidence_id" => planned} <- Enum.find(dependencies, &(&1["subject"] == subject)),
+         %{evidence_id: current, trade_goods: [_ | _] = goods}
+         when is_binary(current) and current != planned <-
+           Enum.find(
+             Intelligence.market_interpretation(agent, system, Clock.utc_now()).markets,
+             &(&1.subject == subject)
+           ),
+         %{"sell_price" => sell} when is_integer(sell) and sell <= price <-
+           Enum.find(goods, &(&1["symbol"] == symbol)) do
+      {:destination_spread_lost, sell, price}
+    else
+      _ -> nil
+    end
+  end
+
+  defp destination_spread_lost(_agent, _parameters, _price), do: nil
 
   @doc false
   def affordable_cargo_units(_credits, 0), do: :infinity
@@ -2728,7 +2769,7 @@ defmodule SpaceTraders.Fleet.Intents do
       in_flight_action: nil,
       last_action_result: result,
       blocker: nil,
-      finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+      finished_at: Clock.timestamp(:second)
     )
   end
 
@@ -2807,7 +2848,7 @@ defmodule SpaceTraders.Fleet.Intents do
            in_flight_action: nil,
            last_action_result: result,
            blocker: nil,
-           finished_at: DateTime.utc_now() |> DateTime.truncate(:second)
+           finished_at: Clock.timestamp(:second)
          ) do
       {:ok, intent} ->
         if intent.caller == "commitment" and intent.type == "deliver",
@@ -3204,6 +3245,12 @@ defmodule SpaceTraders.Fleet.Intents do
   defp block_cargo_intent(
          %Intent{caller: "commitment", type: "buy"} = intent,
          {:price_constraint, _price, _max_price} = reason
+       ),
+       do: mark_infeasible(intent, reason)
+
+  defp block_cargo_intent(
+         %Intent{caller: "commitment", type: "buy"} = intent,
+         {:destination_spread_lost, _sell, _price} = reason
        ),
        do: mark_infeasible(intent, reason)
 
@@ -4963,6 +5010,9 @@ defmodule SpaceTraders.Fleet.Intents do
   # parse an inspected tuple. Other reasons keep their inspected details.
   defp infeasibility_details({:price_constraint, observed, limit}),
     do: %{"observed_price" => observed, "max_price" => limit}
+
+  defp infeasibility_details({:destination_spread_lost, sell, price}),
+    do: %{"destination_sell_price" => sell, "purchase_price" => price}
 
   defp infeasibility_details(reason), do: %{"details" => inspect(reason)}
 

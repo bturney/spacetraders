@@ -7,6 +7,9 @@ defmodule SpaceTraders.MutationAttempts.Attempt do
   @foreign_key_type :binary_id
 
   schema "mutation_attempts" do
+    # Application time can be identical for several causally ordered sends.
+    # The database assigns their stable insertion order independently of UUIDs.
+    field :sequence, :integer, read_after_writes: true
     field :operation_id, :string
     field :operation_owner, :string
     field :state, :string
@@ -36,6 +39,9 @@ defmodule SpaceTraders.MutationAttempts.Attempt do
       foreign_key: :mutation_attempt_id,
       preload_order: [asc: :recorded_at, asc: :id]
 
-    timestamps(type: :utc_datetime_usec)
+    timestamps(
+      type: :utc_datetime_usec,
+      autogenerate: {SpaceTraders.Clock, :timestamp, [:microsecond]}
+    )
   end
 end

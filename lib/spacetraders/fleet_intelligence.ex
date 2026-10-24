@@ -5,6 +5,8 @@ defmodule SpaceTraders.FleetIntelligence do
   alias SpaceTraders.{Clock, Evidence}
   alias SpaceTraders.Evidence.Demand
   alias SpaceTraders.Fleet
+  alias SpaceTraders.FleetAcquisition
+  alias SpaceTraders.FleetAllocation
   alias SpaceTraders.FleetPlanning
   alias SpaceTraders.FleetShadow
   alias SpaceTraders.FleetStrategy.Revision
@@ -164,6 +166,53 @@ defmodule SpaceTraders.FleetIntelligence do
   end
 
   @doc """
+  Synchronizes missing Ship Offer demands from current Claim-only unmet work, not objective wording.
+
+  An unsettled purchase already acts on the offer evidence it read, so while
+  one is open there is no acquisition-driven polling and its demands withdraw.
+  """
+  def sync_acquisition_observation_demands(agent, revision, system, work, now) do
+    waypoints = World.projections(agent, system, now, @waypoint_freshness_seconds).waypoints
+
+    specs =
+      if work == [] or FleetAcquisition.open_purchase(agent) do
+        []
+      else
+        for waypoint <- waypoints,
+            shipyard_waypoint?(waypoint) and not shipyard_listing_fresh?(waypoint) do
+          %Demand{
+            subject: "shipyard:#{system}:#{waypoint.symbol}",
+            required_facts: ["ship_types", "ships"],
+            owner: "fleet_acquisition",
+            due_at: now,
+            deadline_at:
+              Enum.min_by(work, &DateTime.to_unix(&1.validity.expires_at)).validity.expires_at,
+            freshness_seconds: @waypoint_freshness_seconds,
+            agent_id: agent.id,
+            strategy_revision_id: revision.id
+          }
+        end
+      end
+
+    with :ok <- Evidence.sync_runtime_demands(agent, revision, specs, now) do
+      subjects = MapSet.new(specs, & &1.subject)
+
+      agent
+      |> Evidence.list_open_demands()
+      |> Enum.filter(
+        &(&1.owner == "fleet_acquisition" and &1.strategy_revision_id == revision.id)
+      )
+      |> Enum.reject(&MapSet.member?(subjects, &1.subject))
+      |> Enum.reduce_while(:ok, fn demand, :ok ->
+        case Evidence.withdraw_demand(demand, now) do
+          {:ok, _} -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  @doc """
   Plans the evidence half of the Market pilot domain at one decision time.
 
   Waypoint discovery (when nothing is retained) runs first so the decision
@@ -186,9 +235,12 @@ defmodule SpaceTraders.FleetIntelligence do
       # Planning offers a trade only to a Ship that can reach it.
       |> Map.merge(%{
         waypoint_coordinates: world.waypoint_coordinates,
-        fuel_stops: world.fuel_stops
+        fuel_stops: world.fuel_stops,
+        acquisition_work: FleetAllocation.ship_bound_unmet_work(agent, now)
       })
 
+    # Ship Offer demands have one writer, Fleet Allocation's Acquisition
+    # reconcile, which runs on every Market boundary.
     with :ok <- sync_market_demands(agent, revision, market) do
       {:ok,
        %{
@@ -302,7 +354,7 @@ defmodule SpaceTraders.FleetIntelligence do
     market =
       case credit_objective(revision) do
         {index, _} ->
-          if listing_gaps(market_input) != [],
+          if listing_gaps(market_input) != [] or market_input.acquisition_work != [],
             do: [{:market, index}],
             else: []
 
@@ -509,7 +561,26 @@ defmodule SpaceTraders.FleetIntelligence do
         end
       end)
 
-    Enum.uniq_by(existing_opportunities ++ initial_opportunities, & &1.subject)
+    acquisition_opportunities =
+      case market_input.acquisition_work do
+        [] ->
+          []
+
+        work ->
+          # The existing enabled trade outcome values the missing evidence.
+          # Propose it beside Market gaps at the same Strategic Priority, so
+          # subject/objective ordering cannot hide it behind baseline coverage.
+          # This does not change Ship investment valuation or admission.
+          value = Enum.max(Enum.map(work, &(&1.expected_outcomes["maximum_credit_change"] || 0)))
+
+          opportunities(:shipyard, revision, index, waypoints, ships, system, market_input)
+          |> Enum.map(&Map.put(&1, :expected_decision_value, value))
+      end
+
+    Enum.uniq_by(
+      existing_opportunities ++ initial_opportunities ++ acquisition_opportunities,
+      & &1.subject
+    )
   end
 
   defp due_demand?(%Demand{due_at: nil}, _as_of), do: true

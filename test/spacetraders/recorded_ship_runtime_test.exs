@@ -341,10 +341,7 @@ defmodule SpaceTraders.RecordedShipRuntimeTest do
   end
 
   defp restart_capacity do
-    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
-
-    {:ok, _} =
-      Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+    SpaceTraders.Test.Governor.restart()
   end
 
   defp advance_observation_clock_to_now do

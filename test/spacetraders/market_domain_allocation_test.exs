@@ -500,6 +500,49 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert refusal.rejection_reason == "acquisition_already_unsettled"
     end
 
+    test "an unsettled purchase raises no acquisition-driven Shipyard observation demand" do
+      fleet = investment_fleet()
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        purchase: :pending_readiness,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      assert {_open, _attempt} = SpaceTraders.FleetAcquisition.open_purchase(fleet.agent)
+
+      # The offer's Shipyard listing ages past its freshness while the purchase
+      # is still unsettled; unmet work remains.
+      {:ok, _} =
+        Intelligence.observe_waypoint(
+          fleet.agent,
+          Waypoint.from_json(%{
+            "symbol" => "X1-A1",
+            "systemSymbol" => @system,
+            "type" => "PLANET",
+            "x" => 0,
+            "y" => 0,
+            "traits" => [%{"symbol" => "MARKETPLACE"}, %{"symbol" => "SHIPYARD"}]
+          }),
+          source: "get_waypoint"
+        )
+
+      Repo.update_all(
+        from(o in Intelligence.Observation, where: o.subject_type == "shipyard"),
+        set: [observed_at: DateTime.add(DateTime.utc_now(:second), -301)]
+      )
+
+      assert [_ | _] = SpaceTraders.FleetAllocation.ship_bound_unmet_work(fleet.agent)
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      assert SpaceTraders.FleetAcquisition.open_purchase(fleet.agent)
+
+      refute fleet.agent
+             |> SpaceTraders.Evidence.list_open_demands()
+             |> Enum.any?(&(&1.owner == "fleet_acquisition"))
+    end
+
     test "refusal reason comes from the objective that owns the unmet work" do
       chart = %{
         "objective" => "Chart useful waypoints",
@@ -794,6 +837,56 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
 
       listing(fleet.agent, "X1-A3", 50, 24)
       assert [] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
+    end
+
+    for change <- [:replacement, :invalidation] do
+      test "a third-Market FUEL #{change} invalidates its original Claim-only work" do
+        fleet = fleet([@frigate])
+        listing(fleet.agent, "X1-A3", 50, 24)
+        observed_at = DateTime.add(DateTime.utc_now(), -1700)
+
+        {fuel, _} =
+          retained_market_listing(
+            fleet.agent,
+            @system,
+            "X1-FUEL",
+            [
+              %{symbol: "FUEL", purchase_price: 100, sell_price: 90, trade_volume: 40}
+            ],
+            observed_at: observed_at
+          )
+
+        stub_game(fleet.agent, [@frigate], refuse_ship_reads: true)
+        assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+        assert [_ | _] = work = FleetAllocation.ship_bound_unmet_work(fleet.agent)
+
+        for candidate <- work do
+          assert candidate.expected_outcomes["trade_estimate"]["fuel_price"] == 100
+
+          assert Enum.any?(
+                   candidate.dependencies,
+                   &(&1["evidence_id"] == "evidence-observation:#{fuel.id}")
+                 )
+
+          assert candidate.validity.expires_at == DateTime.add(fuel.observed_at, 1800)
+        end
+
+        assert [] =
+                 FleetAllocation.ship_bound_unmet_work(
+                   fleet.agent,
+                   DateTime.add(fuel.observed_at, 1801)
+                 )
+
+        if unquote(change) == :replacement do
+          retained_market_listing(fleet.agent, @system, "X1-FUEL", [
+            %{symbol: "FUEL", purchase_price: 100, sell_price: 90, trade_volume: 40}
+          ])
+        else
+          assert {:ok, _} = Intelligence.invalidate(fleet.agent, :market, @system, "X1-FUEL")
+        end
+
+        assert [] = FleetAllocation.ship_bound_unmet_work(fleet.agent)
+      end
     end
 
     test "only the latest Market Episode contributes, not older losers or another domain" do

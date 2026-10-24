@@ -9,7 +9,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
 
   alias SpaceTraders.FleetCapacity
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.MarketDomain
+  alias SpaceTraders.FleetAllocation.{Acquisition, MarketDomain}
   alias SpaceTraders.Agent.Scope
   alias SpaceTraders.Agent.Agent, as: AgentRecord
   alias SpaceTraders.Fleet
@@ -118,15 +118,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
       system = system_for(agent)
 
       if system do
-        MarketDomain.reconcile(scope, agent, revision, system, market_capacity(capacity))
-
-        SpaceTraders.FleetAllocation.Acquisition.reconcile(
-          scope,
-          agent,
-          revision,
-          system,
-          capacity
-        )
+        market_and_acquisition(scope, agent, revision, system, capacity)
 
         FleetResources.reconcile(scope, agent, revision, system)
         FleetRefit.reconcile(scope, agent, revision, system)
@@ -257,15 +249,7 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
   # beside the published pilot work.
   defp reconcile_market_boundary(agent_id, system_symbol, capacity, resources?) do
     with_context(agent_id, fn scope, agent, revision ->
-      MarketDomain.reconcile(scope, agent, revision, system_symbol, market_capacity(capacity))
-
-      SpaceTraders.FleetAllocation.Acquisition.reconcile(
-        scope,
-        agent,
-        revision,
-        system_symbol,
-        capacity
-      )
+      market_and_acquisition(scope, agent, revision, system_symbol, capacity)
 
       enforce_sync_result!(
         agent.id,
@@ -280,6 +264,25 @@ defmodule SpaceTraders.FleetAllocation.Reconciler do
     end)
 
     :ok
+  end
+
+  defp market_and_acquisition(scope, agent, revision, system, capacity) do
+    acquisition = fn ->
+      Acquisition.reconcile(scope, agent, revision, system, capacity)
+    end
+
+    result =
+      MarketDomain.reconcile(
+        scope,
+        agent,
+        revision,
+        system,
+        market_capacity(capacity),
+        acquisition
+      )
+
+    unless match?({:ok, %{acquisition_handoff: true}}, result), do: acquisition.()
+    result
   end
 
   # An explicit disposition is the deterministic enabled-work advisory seam.

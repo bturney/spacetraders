@@ -11,6 +11,8 @@ defmodule SpaceTraders.MutationAttempts do
 
   alias SpaceTraders.Agent.{Agent, Scope}
   alias SpaceTraders.API.OperationInventory.Operation
+  alias SpaceTraders.Clock
+  alias SpaceTraders.CreditSpending
   alias SpaceTraders.Fleet.{Intent, Ship}
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.Evidence
@@ -78,7 +80,7 @@ defmodule SpaceTraders.MutationAttempts do
               mutation_attempt_id: attempt.id,
               classification: "ambiguous",
               evidence: %{"reason" => "historical send state unknown"},
-              recorded_at: DateTime.utc_now()
+              recorded_at: Clock.timestamp(:microsecond)
             })
 
             current |> Ecto.Changeset.change(mutation_attempt_id: attempt.id) |> Repo.update!()
@@ -199,7 +201,7 @@ defmodule SpaceTraders.MutationAttempts do
     retry = build_attempt(operation, path, opts, context)
 
     Repo.transaction(fn ->
-      SpaceTraders.CreditSpending.lock_agent(original)
+      CreditSpending.lock_agent(original)
       current = locked_attempt(original.id)
 
       cond do
@@ -234,7 +236,7 @@ defmodule SpaceTraders.MutationAttempts do
   @spec mark_sent_or_unknown(Attempt.t()) :: {:ok, Attempt.t()} | {:error, term()}
   def mark_sent_or_unknown(%Attempt{state: "prepared"} = attempt) do
     Repo.transaction(fn ->
-      SpaceTraders.CreditSpending.lock_agent(attempt)
+      CreditSpending.lock_agent(attempt)
       lock_dependencies(attempt.dependency_keys)
       current = locked_attempt(attempt.id)
 
@@ -247,7 +249,7 @@ defmodule SpaceTraders.MutationAttempts do
           current
           |> Ecto.Changeset.change(
             state: "sent_or_unknown",
-            sent_or_unknown_at: DateTime.utc_now()
+            sent_or_unknown_at: Clock.timestamp(:microsecond)
           )
           |> Repo.update!()
 
@@ -304,7 +306,7 @@ defmodule SpaceTraders.MutationAttempts do
       [attempt],
       attempt.operation_id == "register" and attempt.operator_id == ^operator_id
     )
-    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
+    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.sequence)
     |> limit(1)
     |> preload(:outcomes)
     |> Repo.one()
@@ -327,7 +329,7 @@ defmodule SpaceTraders.MutationAttempts do
           agent_id: agent_id,
           fleet_generation_id: generation_id,
           recovery_credential: nil,
-          updated_at: DateTime.utc_now()
+          updated_at: Clock.timestamp(:microsecond)
         ]
       )
 
@@ -346,7 +348,7 @@ defmodule SpaceTraders.MutationAttempts do
   def reconcile(%Attempt{} = attempt, resolution, observations, opts)
       when resolution in [:accepted, :absent, :bounded_unknown] and is_list(observations) do
     Repo.transaction(fn ->
-      SpaceTraders.CreditSpending.lock_agent(attempt)
+      CreditSpending.lock_agent(attempt)
       current = locked_attempt(attempt.id)
 
       with {:ok, evidence} <-
@@ -378,7 +380,7 @@ defmodule SpaceTraders.MutationAttempts do
   @doc "Consumes an unused retry when fresh dependent evidence already satisfies its selected outcome."
   def withdraw_retry(%Attempt{} = attempt, observations) do
     Repo.transaction(fn ->
-      SpaceTraders.CreditSpending.lock_agent(attempt)
+      CreditSpending.lock_agent(attempt)
       current = locked_attempt(attempt.id)
 
       evidence =
@@ -397,7 +399,7 @@ defmodule SpaceTraders.MutationAttempts do
         mutation_attempt_id: current.id,
         classification: "absent",
         evidence: scrub(Map.put(evidence, "retry_disposition", "selected_outcome_satisfied")),
-        recorded_at: DateTime.utc_now()
+        recorded_at: Clock.timestamp(:microsecond)
       })
 
       Repo.preload(updated, :outcomes, force: true)
@@ -408,7 +410,7 @@ defmodule SpaceTraders.MutationAttempts do
   def retire_unused_retry(%Attempt{} = attempt, disposition)
       when disposition == "retired_authority_unavailable" do
     Repo.transaction(fn ->
-      SpaceTraders.CreditSpending.lock_agent(attempt)
+      CreditSpending.lock_agent(attempt)
       current = locked_attempt(attempt.id)
 
       unless current.state == "absent" and current.retry_authorized and
@@ -421,7 +423,7 @@ defmodule SpaceTraders.MutationAttempts do
         mutation_attempt_id: current.id,
         classification: "absent",
         evidence: %{"retry_disposition" => disposition},
-        recorded_at: DateTime.utc_now()
+        recorded_at: Clock.timestamp(:microsecond)
       })
 
       Repo.preload(updated, :outcomes, force: true)
@@ -463,7 +465,7 @@ defmodule SpaceTraders.MutationAttempts do
     |> where([attempt], attempt.state in ^states)
     |> where([attempt], fragment("? @> ?", attempt.provenance, ^provenance))
     |> linked_attempt(intent.mutation_attempt_id)
-    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.id)
+    |> order_by([attempt], desc: attempt.prepared_at, desc: attempt.sequence)
     |> limit(1)
     |> Repo.one()
     |> case do
@@ -483,10 +485,10 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp append_outcome(attempt, classification, evidence, attempt_changes \\ []) do
-    now = DateTime.utc_now()
+    now = Clock.timestamp(:microsecond)
 
     Repo.transaction(fn ->
-      SpaceTraders.CreditSpending.lock_agent(attempt)
+      CreditSpending.lock_agent(attempt)
       current = locked_attempt(attempt.id)
 
       unless outcome_allowed?(current.state, classification) do
@@ -547,7 +549,7 @@ defmodule SpaceTraders.MutationAttempts do
   end
 
   defp build_attempt(operation, path, opts, context) do
-    now = DateTime.utc_now()
+    now = Clock.timestamp(:microsecond)
     dependency_keys = dependency_keys(operation, path, opts, context)
     admitted_bounded_unknown_ids = admitted_bounded_unknown_ids(opts)
 
@@ -786,7 +788,7 @@ defmodule SpaceTraders.MutationAttempts do
 
   defp list(query) do
     query
-    |> order_by([attempt], asc: attempt.prepared_at, asc: attempt.id)
+    |> order_by([attempt], asc: attempt.prepared_at, asc: attempt.sequence)
     |> preload(:outcomes)
     |> Repo.all()
   end

@@ -370,8 +370,37 @@ defmodule SpaceTraders.FleetPlanningTest do
 
       assert candidate.expected_outcomes.trade_estimate == %{
                state: :unknown,
-               reason: :unknown_engine
+               reason: :unknown_engine,
+               fuel_price: 72
              }
+    end
+
+    for reason <- [:no_ship_evidence, :unknown_engine] do
+      test "#{reason} retains independently priced FUEL and its third-Market validity" do
+        snapshot = rate_snapshot([trader("TRADER-1", nil)])
+
+        snapshot =
+          if unquote(reason) == :no_ship_evidence,
+            do: Map.delete(snapshot, :ships),
+            else: snapshot
+
+        fuel = market("X1-A4", ~U[2030-01-01 11:55:01Z], [good("FUEL", 100, 90, 40)])
+        snapshot = Map.update!(snapshot, :markets, &(&1 ++ [fuel]))
+        assert {:ok, plan} = FleetPlanning.plan_market(revision(), 0, snapshot)
+        candidate = Enum.find(plan.candidate_contributions, &(&1.destination_waypoint == "X1-A2"))
+
+        assert candidate.expected_outcomes.net_credits_per_ship_hour == nil
+
+        assert %{state: :unknown, reason: unquote(reason), fuel_price: 100} =
+                 candidate.expected_outcomes.trade_estimate
+
+        assert Enum.any?(candidate.dependencies, fn dependency ->
+                 dependency.subject == fuel.subject and dependency.evidence_id == fuel.evidence_id and
+                   dependency.observed_at == fuel.observed_at
+               end)
+
+        assert candidate.validity.expires_at == ~U[2030-01-01 12:00:01Z]
+      end
     end
   end
 

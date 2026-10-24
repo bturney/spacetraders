@@ -52,10 +52,7 @@ defmodule SpaceTraders.CurrentFleetDurabilityTest do
   end
 
   defp restart_capacity_governor do
-    :ok = Supervisor.terminate_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
-
-    {:ok, _pid} =
-      Supervisor.restart_child(SpaceTraders.Supervisor, SpaceTraders.API.CapacityGovernor)
+    SpaceTraders.Test.Governor.restart()
   end
 
   @tag mint_proof: true

@@ -14,21 +14,25 @@ defmodule SpaceTraders.FleetAcquisition do
   alias SpaceTraders.Agent, as: AgentContext
   alias SpaceTraders.Agent.{Agent, Scope}
   alias SpaceTraders.API.AgentTokenReference
+  alias SpaceTraders.Clock
   alias SpaceTraders.Evidence
   alias SpaceTraders.Fleet
   alias SpaceTraders.Fleet.Ship
   alias SpaceTraders.FleetAllocation
-  alias SpaceTraders.FleetAllocation.Commitment
+  alias SpaceTraders.FleetAllocation.{Commitment, JsonEvidence, MarketDomain}
+  alias SpaceTraders.FleetPlanning.ShipInvestment
   alias SpaceTraders.FleetGeneration.Generation
   alias SpaceTraders.FleetStrategy.{Revision, Strategy}
   alias SpaceTraders.CreditSpending
   alias SpaceTraders.MutationAttempts
   alias SpaceTraders.MutationAttempts.Attempt
+  alias SpaceTraders.Observability
+  alias SpaceTraders.OperatorAuthority
   alias SpaceTraders.Repo
 
   @doc "Resumes the open acquisition's purchase and registers the Ship from authoritative readiness."
   def reconcile(%Scope{} = scope, %Agent{} = agent) do
-    with {:ok, _} <- SpaceTraders.OperatorAuthority.authorize(scope),
+    with {:ok, _} <- OperatorAuthority.authorize(scope),
          %Generation{} <- FleetAllocation.active_generation(agent) do
       case open_purchase(agent) do
         {commitment, attempt} ->
@@ -143,6 +147,7 @@ defmodule SpaceTraders.FleetAcquisition do
            :ok <-
              FleetAllocation.admit_current_agent(current.agent_id, current.fleet_generation_id),
            {:ok, revision} <- current_purchase_authority(current),
+           :ok <- current_investment_evidence(current),
            :ok <- CreditSpending.admit(current, nil, revision),
            {:ok, sent} <- MutationAttempts.mark_sent_or_unknown(current) do
         sent
@@ -158,6 +163,41 @@ defmodule SpaceTraders.FleetAcquisition do
 
       result ->
         result
+    end
+  end
+
+  # Admission can wait past the published investment's original evidence.
+  # Reuse its exact dependencies, never restamp its Claim-only loser. Legacy
+  # execution-only publications have no Candidate evidence to reinterpret.
+  defp current_investment_evidence(attempt) do
+    commitment_id = attempt.provenance["commitment_id"]
+    commitment = if is_integer(commitment_id), do: Repo.get(Commitment, commitment_id)
+
+    candidate =
+      if commitment,
+        do: FleetAllocation.commitment_decision_episode(commitment).expectations["candidate"]
+
+    case candidate do
+      %{"validity" => %{"expires_at" => expires}, "dependencies" => dependencies}
+      when is_binary(expires) and is_list(dependencies) ->
+        agent = Repo.get!(Agent, attempt.agent_id)
+
+        with {:ok, expiry, _} <- DateTime.from_iso8601(expires),
+             :gt <- DateTime.compare(expiry, Clock.utc_now()),
+             :ok <-
+               MarketDomain.revalidate_trade_evidence(agent, [
+                 %{dependencies: dependencies}
+               ]) do
+          :ok
+        else
+          _ -> {:error, :ship_investment_evidence_unavailable}
+        end
+
+      nil ->
+        :ok
+
+      _ ->
+        {:error, :ship_investment_evidence_unavailable}
     end
   end
 
@@ -434,8 +474,8 @@ defmodule SpaceTraders.FleetAcquisition do
   defp transaction_map(transaction), do: Map.from_struct(transaction)
 
   defp readiness_matches?(ready, requirements) when is_map(ready) and is_map(requirements) do
-    requirements = SpaceTraders.FleetAllocation.JsonEvidence.dump(requirements)
-    configuration = SpaceTraders.FleetPlanning.ShipInvestment.configuration(ready)
+    requirements = JsonEvidence.dump(requirements)
+    configuration = ShipInvestment.configuration(ready)
     profile = work_profile(ready)
 
     with %{} = promised <- requirements["configuration"],
@@ -484,7 +524,7 @@ defmodule SpaceTraders.FleetAcquisition do
   defp matches_fields?(actual, expected), do: actual == expected
 
   defp observe(portfolio, commitment, agent, callback) do
-    SpaceTraders.Observability.with_context(
+    Observability.with_context(
       [
         operator_id: agent.operator_id,
         agent_id: agent.id,
