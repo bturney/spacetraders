@@ -164,12 +164,17 @@ defmodule SpaceTraders.FleetIntelligence do
     end
   end
 
-  @doc "Synchronizes missing Ship Offer demands from current Claim-only unmet work, not objective wording."
+  @doc """
+  Synchronizes missing Ship Offer demands from current Claim-only unmet work, not objective wording.
+
+  An unsettled purchase already acts on the offer evidence it read, so while
+  one is open there is no acquisition-driven polling and its demands withdraw.
+  """
   def sync_acquisition_observation_demands(agent, revision, system, work, now) do
     waypoints = World.projections(agent, system, now, @waypoint_freshness_seconds).waypoints
 
     specs =
-      if work == [] do
+      if work == [] or SpaceTraders.FleetAcquisition.open_purchase(agent) do
         []
       else
         for waypoint <- waypoints,

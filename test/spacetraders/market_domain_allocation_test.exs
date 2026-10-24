@@ -500,6 +500,49 @@ defmodule SpaceTraders.MarketDomainAllocationTest do
       assert refusal.rejection_reason == "acquisition_already_unsettled"
     end
 
+    test "an unsettled purchase raises no acquisition-driven Shipyard observation demand" do
+      fleet = investment_fleet()
+
+      stub_game(fleet.agent, [@frigate],
+        investment: true,
+        purchase: :pending_readiness,
+        refuse_ship_reads: true
+      )
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      assert {_open, _attempt} = SpaceTraders.FleetAcquisition.open_purchase(fleet.agent)
+
+      # The offer's Shipyard listing ages past its freshness while the purchase
+      # is still unsettled; unmet work remains.
+      {:ok, _} =
+        Intelligence.observe_waypoint(
+          fleet.agent,
+          Waypoint.from_json(%{
+            "symbol" => "X1-A1",
+            "systemSymbol" => @system,
+            "type" => "PLANET",
+            "x" => 0,
+            "y" => 0,
+            "traits" => [%{"symbol" => "MARKETPLACE"}, %{"symbol" => "SHIPYARD"}]
+          }),
+          source: "get_waypoint"
+        )
+
+      Repo.update_all(
+        from(o in Intelligence.Observation, where: o.subject_type == "shipyard"),
+        set: [observed_at: DateTime.add(DateTime.utc_now(:second), -301)]
+      )
+
+      assert [_ | _] = SpaceTraders.FleetAllocation.ship_bound_unmet_work(fleet.agent)
+
+      assert :ok = Reconciler.observe_market_evidence(fleet.agent.id, @system, proceed())
+      assert SpaceTraders.FleetAcquisition.open_purchase(fleet.agent)
+
+      refute fleet.agent
+             |> SpaceTraders.Evidence.list_open_demands()
+             |> Enum.any?(&(&1.owner == "fleet_acquisition"))
+    end
+
     test "refusal reason comes from the objective that owns the unmet work" do
       chart = %{
         "objective" => "Chart useful waypoints",
