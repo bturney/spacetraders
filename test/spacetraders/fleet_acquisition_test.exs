@@ -401,11 +401,43 @@ defmodule SpaceTraders.FleetAcquisitionTest do
 
       Req.Test.stub(SpaceTraders.API, fn _ -> flunk("unsent interruption cannot replay") end)
 
-      assert {:error, :ship_purchase_not_completed} =
-               FleetAcquisition.reconcile(scope, agent)
+      # Allocation snapshots open-at-entry before asking the purchase owner to
+      # recover. Its one-boundary refusal is not a claim that transport ran, or
+      # a funding refusal. Retain the original Attempt and publication lineage.
+      assert {open, original} = FleetAcquisition.open_purchase(agent)
+      assert open.id == commitment.id
+      assert original.id == attempt.id
+      assert original.provenance["decision_episode_id"] == portfolio.strategy_decision_episode_id
 
-      assert [%{state: "not_sent"}] = purchase_attempts(agent)
+      assert %{rejection_reason: "acquisition_already_unsettled"} =
+               SpaceTraders.FleetAllocation.Acquisition.reconcile(
+                 scope,
+                 agent,
+                 revision,
+                 "X1-UX81",
+                 nil
+               )
+
+      assert [%{id: id, state: "not_sent", sent_or_unknown_at: nil} = recovered] =
+               purchase_attempts(agent)
+
+      assert id == attempt.id
+      assert recovered.prepared_evidence == original.prepared_evidence
+      assert recovered.provenance == original.provenance
+      assert Enum.all?(recovered.outcomes, &(&1.classification == "not_sent"))
       assert FleetAllocation.current_portfolio(scope, agent) == nil
+      assert FleetAcquisition.open_purchase(agent) == nil
+
+      assert %{rejection_reason: "no_claim_only_loser"} =
+               SpaceTraders.FleetAllocation.Acquisition.reconcile(
+                 scope,
+                 agent,
+                 revision,
+                 "X1-UX81",
+                 nil
+               )
+
+      assert [%{id: ^id, state: "not_sent"}] = purchase_attempts(agent)
     end
   end
 
